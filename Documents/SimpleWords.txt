@@ -1,0 +1,24 @@
+Imagine an auction in a room. Someone holds up a toy, and kids shout prices. "Ten rupees!" "Twenty!" The highest shout when time runs out wins the toy.
+
+One person writes the shouts down in a notebook, so everyone knows who's winning. Fine — until that person falls asleep. Now nobody knows who won, and the last few shouts are lost forever.
+
+So we use three people with three notebooks. Now if one falls asleep, the other two still know. But a new problem appears: they might write different things. One hears "twenty," another hears "thirty." Now who won?
+
+Raft is the rulebook for keeping the three notebooks the same. The rules are simple:
+
+One of the three is the boss. Only the boss writes down new shouts.
+When the boss hears a shout, it tells the other two: "write this down."
+A shout only really counts once two of the three have it in their notebook. Then the boss tells the kid: "yes, your bid is in."
+The boss keeps saying "I'm still awake, I'm still awake." If the other two stop hearing that, they know the boss fell asleep. They vote and pick a new boss.
+
+Here's the clever bit, the one thing worth understanding: because every counted shout was written in two of three notebooks, and a new boss needs two of three votes to win — the new boss is guaranteed to already have every shout that counted. Nothing that was promised can be lost. That's the whole trick.
+
+gRPC is just how they talk to each other — a strict little language where every sentence has an agreed shape, so nobody can mishear.
+
+The LLM server is a helpful friend in the corner. It answers "how does bidding work?" and writes nice descriptions of the toys. It never touches the notebooks. It's a helper, not a record-keeper.
+
+And the three things we just added are your proof:
+
+The dashboard is a window into all three notebooks at once, so you can watch the boss fall asleep and a new one get elected.
+The checker is a referee holding every receipt: "you promised these twenty bids — show me all twenty are still there."
+The chaos harness is a mischief-maker who knocks people asleep at random times — but with a magic dice that remembers. Say "dice number 42" and it does the exact same mischief again, so you can watch the bug happen a second time instead of hoping it comes back.
