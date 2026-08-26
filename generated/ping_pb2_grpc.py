@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import ping_pb2 as ping__pb2
+from generated import ping_pb2 as ping__pb2
 
 GRPC_GENERATED_VERSION = '1.83.0'
 GRPC_VERSION = grpc.__version__
