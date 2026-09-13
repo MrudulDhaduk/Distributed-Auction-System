@@ -7,6 +7,14 @@ Python, gRPC, and a from-scratch implementation of the Raft consensus protocol.
 
 There is a viva. I have to defend every line of this codebase under questioning.
 
+## Environment
+
+Bare `python` on this machine resolves to miniforge3, not this repo's
+`.venv` — it will not have pytest or grpcio-tools on its path. Always use
+`.venv\Scripts\python.exe` (or activate the venv first) for running tests
+and `scripts\gen_proto.py`. See the "Environment (PowerShell)" section in
+[README.md](README.md) for the exact commands.
+
 ## The rule that overrides everything else
 
 **I am learning distributed systems by building this. Your job is to help me
