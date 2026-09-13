@@ -43,6 +43,12 @@ class BidEntry:
     time_stamp: datetime.datetime
 
 
+@dataclass(frozen=True)
+class CloseAuction:
+    auction_id: int
+    curr_time: datetime.datetime
+
+
 class AuctionState:
     """In-memory auction table, keyed by auction id."""
 
@@ -54,7 +60,7 @@ class AuctionState:
 
     def apply(self, command):
         """Apply one command and return whether it was accepted.
- 
+
         Serialised by `self._lock`: one command runs start to finish before
         the next begins, so the check-then-act sequences below cannot
         interleave. The lock guarantees safety, not ordering -- which
@@ -71,6 +77,9 @@ class AuctionState:
                     "item": command.item,
                     "close_time": command.close_time,
                     "bids": [],
+                    "closed": False,
+                    "winner": None,
+                    "closed_at": None,
                 }
                 return Result(success=True, reason="Auction created successfully")
 
@@ -82,9 +91,10 @@ class AuctionState:
                         reason="Auction ID does not exist, please check the ID again",
                     )
 
+                if auction["closed"]:
+                    return Result(success=False, reason=f"Auction is already closed {command.bidder}")
                 if command.curr_time > auction["close_time"]:
-                    return Result(success=False, reason="Auction already closed")
-
+                    return Result(success=False, reason=f"Time is up {command.bidder}")
                 highest_bid = max(
                     (entry.bid_amount for entry in auction["bids"]), default=0
                 )
@@ -104,6 +114,28 @@ class AuctionState:
 
                 auction["bids"].append(bid)
                 return Result(success=True, reason=(f"Bid of {command.amount} added"))
+
+            if isinstance(command, CloseAuction):
+                auction = self.auctions.get(command.auction_id)
+                if auction is None:
+                    return Result(success=False, reason="Auction dosen't exist")
+
+                if auction["closed"]:
+                    return Result(success=False, reason="Auction is already closed")
+
+                if command.curr_time <= auction["close_time"]:
+                    return Result(
+                        success=False, reason="There is still time left for the auction"
+                    )
+
+                auction["closed"] = True
+                auction["closed_at"] = command.curr_time
+
+                if auction["bids"]:
+                    auction["winner"] = max(auction["bids"], key=lambda p: p.bid_amount)
+                    return Result(success=True, reason="The auction is closed")
+
+                return Result(success=True, reason="The auction is closed with no winner")
 
             return Result(
                 success=False,

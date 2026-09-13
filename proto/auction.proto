@@ -1,0 +1,213 @@
+syntax = "proto3";
+
+package auction;
+
+// All times are int64 epoch microseconds, UTC. No google.protobuf.Timestamp:
+// it drops an import and the CopyFrom/ToDatetime dance, kills timezone
+// ambiguity, and matches the "integer microseconds for time" discipline the
+// Raft log will use -- one representation from the wire to the log.
+
+// Task 3: authentication, sessions, and the real auction operations over
+// gRPC. Still one server, no Raft.
+//
+// Deliberately NOT in this file (each gets its own .proto, its own task):
+//   - RequestVote / AppendEntries          -> raft.proto      (Tasks 5-7)
+//   - GetNodeStatus                        -> status.proto    (dashboard)
+//   - the LLM service                      -> llm.proto       (Task 4)
+//
+// Two design decisions the reader should know up front:
+//
+//   1. The session token travels in gRPC *metadata* (like an HTTP
+//      Authorization header), never as a field in these messages. A
+//      server-side interceptor validates it once, before any handler
+//      runs, and rejects with UNAUTHENTICATED. That is why no request
+//      below has a `token` field and no request below has a `bidder`
+//      field -- the caller's identity is the validated token, not
+//      something they get to type.
+//
+//      The interceptor MUST exempt AuthService.Login from the token
+//      check -- you cannot present a token in order to obtain one.
+//      Everything else, Logout included, requires a valid token.
+//
+//   2. A rejected bid is not a transport error. The RPC succeeded; the
+//      auction's answer was "no". Business outcomes ride in a `Result`
+//      field in the response body (mirroring auction/state.py's
+//      `Result(success, reason)`). gRPC status codes are reserved for
+//      calls that could not be processed at all: UNAUTHENTICATED (bad
+//      token), INVALID_ARGUMENT (malformed message), INTERNAL (bug).
+
+
+// --- Shared outcome type -----------------------------------------------
+
+// 1:1 with auction/state.py's `Result` dataclass. `success` is the
+// auction's decision, not "did the call reach the server".
+message Result {
+  bool success = 1;
+  string reason = 2;
+}
+
+
+// --- Authentication and sessions -------------------------------------------
+
+// Kept separate from AuctionService because auth is orthogonal to auction
+// logic: different failure modes, and in a stretch goal (Raft-replicated
+// sessions) it evolves independently. Merging the two services later is a
+// two-line change if it turns out not to matter.
+service AuthService {
+  // login(username, password) -> token
+  rpc Login(LoginRequest) returns (LoginResponse);
+
+  // logout(token) -- token is read from metadata, like every other
+  // authenticated call, so the request body is empty.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  // success=false, token="" on bad credentials. Bad credentials are an
+  // expected outcome, not an RpcError -- same rule as a rejected bid.
+  Result result = 1;
+  string token = 2;
+}
+
+// Empty today. A named message (rather than google.protobuf.Empty) so a
+// field can be added later without changing the method signature.
+message LogoutRequest {}
+
+message LogoutResponse {
+  // Idempotent: logging out an already-invalid token still reports
+  // success -- the postcondition ("this token is not valid") holds either
+  // way. The handler decides; this comment just records the intent.
+  Result result = 1;
+}
+
+
+// --- Auction operations --------------------------------------------------
+
+// The handout's client wrapper is post(token, type, data) and
+// get(token, type, params), with `type` a discriminator string. The
+// wrapper dispatches on `type` to the domain RPCs below:
+//   post(token, "auction", {id, item, close_time}) -> CreateAuction
+//   post(token, "bid",     {auction_id, amount})   -> PlaceBid
+//   get(token,  "auction", {auction_id})           -> GetAuction
+//   get(token,  "auctions", {include_closed})      -> ListAuctions
+service AuctionService {
+  rpc CreateAuction(CreateAuctionRequest) returns (CreateAuctionResponse);
+
+  rpc PlaceBid(PlaceBidRequest) returns (PlaceBidResponse);
+
+  rpc GetAuction(GetAuctionRequest) returns (GetAuctionResponse);
+
+  rpc ListAuctions(ListAuctionsRequest) returns (ListAuctionsResponse);
+}
+
+message CreateAuctionRequest {
+  // Client-assigned id, matching CreateAuction in auction/state.py. The
+  // handler rejects a duplicate via Result, it does not crash.
+  int64 auction_id = 1;
+  string item = 2;
+  // Seller-chosen close time, epoch microseconds UTC. This one IS
+  // caller-supplied -- it is a parameter of the auction, not a reading of
+  // "now". It is only the *scheduled* close: the auction actually closes
+  // when a CloseAuction command is applied (see Auction.closed below).
+  int64 close_time = 3;
+}
+
+message CreateAuctionResponse {
+  Result result = 1;
+  // Echoed back so a future "server assigns the id" variant does not
+  // change the response shape.
+  int64 auction_id = 2;
+}
+
+message PlaceBidRequest {
+  int64 auction_id = 1;
+  // Currency is implicit (single unit, integer amounts) -- same as
+  // `amount: int` in auction/state.py.
+  int64 amount = 2;
+  // No `bidder`: identity comes from the validated token.
+  // No `timestamp`: the handler stamps one clock reading at the moment of
+  // receipt and freezes it onto the PlaceBid command (keeping apply()
+  // deterministic). The client never puts a time on the wire -- it cannot
+  // be trusted (clock skew, or backdating a bid past the close time), and
+  // the command never crosses the network as this message anyway (in M2
+  // it is replicated as a Raft log entry, a different message).
+}
+
+message PlaceBidResponse {
+  Result result = 1;
+  // Included so a rejected bidder can immediately re-bid sensibly,
+  // without a second round trip to GetAuction.
+  int64 current_high_bid = 2;
+  string current_high_bidder = 3;
+}
+
+message GetAuctionRequest {
+  int64 auction_id = 1;
+}
+
+message GetAuctionResponse {
+  // "no such auction" is an expected outcome, so it rides in Result
+  // (success=false, reason="no such auction"), not a NOT_FOUND status --
+  // same one pattern as every other response. `auction` is unset when
+  // success=false.
+  Result result = 1;
+  Auction auction = 2;
+}
+
+message ListAuctionsRequest {
+  // Default (false): only auctions still open. The dashboard and a
+  // browsing bidder want the short list.
+  bool include_closed = 1;
+}
+
+message ListAuctionsResponse {
+  repeated AuctionSummary auctions = 1;
+}
+
+// --- Auction data (read side) ------------------------------------------
+//
+// `closed` and `winner` are STORED STATE, not derived. Closing is a
+// command: a CloseAuction(auction_id) is proposed (in M1, a timer in the
+// handler calls apply(CloseAuction(...)) directly; in M2 it goes through
+// the Raft log), and applying it sets closed=true and freezes the winner
+// from the bid history at that instant. This is correctness property 4:
+// expiry is decided once, by the cluster, not recomputed by each node
+// against its own wall clock -- two nodes with 2s of clock skew must
+// never disagree about whether an auction has closed. A read handler that
+// compared close_time to "now" would reintroduce exactly that bug.
+//
+// `current_high_bid` / `current_high_bidder` are a deterministic function
+// of the applied bid list (max by amount), so a read handler may compute
+// them -- no clock involved.
+
+message Auction {
+  int64 auction_id = 1;
+  string item = 2;
+  int64 close_time = 3;          // scheduled close, epoch microseconds UTC
+  bool closed = 4;              // stored: set by an applied CloseAuction
+  int64 current_high_bid = 5;
+  string current_high_bidder = 6;
+  repeated Bid bids = 7;          // full history, in the order applied
+  string winner = 8;             // stored: frozen at close, "" until then
+}
+
+// 1:1 with auction/state.py's `BidEntry`.
+message Bid {
+  string bidder = 1;
+  int64 amount = 2;
+  int64 time = 3;               // epoch microseconds UTC, server-stamped
+}
+
+// Lightweight row for the list view: no bid history.
+message AuctionSummary {
+  int64 auction_id = 1;
+  string item = 2;
+  int64 close_time = 3;          // scheduled close, epoch microseconds UTC
+  bool closed = 4;              // stored: set by an applied CloseAuction
+  int64 current_high_bid = 5;
+}
