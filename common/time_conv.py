@@ -18,7 +18,6 @@ import datetime
 
 MICROS_PER_SECOND = 1_000_000
 
-
 def dt_to_micros(dt: datetime.datetime) -> int:
     """Convert a timezone-aware UTC datetime to epoch microseconds."""
     if dt.utcoffset() is None:

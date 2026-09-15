@@ -11,9 +11,9 @@ import datetime
 
 import grpc
 
+from common import time_conv
+from common.wire import TOKEN_METADATA_KEY
 from generated import auction_pb2, auction_pb2_grpc
-from server import time_conv
-from server.auth_interceptor import TOKEN_METADATA_KEY
 
 
 def _auth_metadata(token):
@@ -54,7 +54,20 @@ def do_place_bid(stub, token, auction_id, amount):
 
 
 def do_get_auction(stub, token, auction_id):
-    # calls AuctionService.GetAuction; returns the Auction (or None)
+    """Calls AuctionService.GetAuction and returns the Auction, or None.
+
+    Unlike do_create_auction / do_place_bid, this one unwraps result.success
+    before handing anything back. GetAuctionResponse nests an Auction
+    submessage, and protobuf has no null for submessages -- on failure
+    response.auction is still present, just zero-filled, so it looks like a
+    real auction with auction_id: 0 to a caller that doesn't check
+    result.success first. Returning None instead makes that failure
+    impossible to mistake for data.
+
+    The other two responses carry only scalars (and a failed PlaceBid's
+    current_high_bid is itself useful), so there's nothing there a caller
+    could mistake for success -- no unwrapping needed.
+    """
     response = stub.GetAuction(
         auction_pb2.GetAuctionRequest(
             auction_id=auction_id,

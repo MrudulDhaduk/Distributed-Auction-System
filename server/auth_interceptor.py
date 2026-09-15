@@ -17,7 +17,7 @@ an oversight.
 
 import grpc
 
-TOKEN_METADATA_KEY = "token"
+from common.wire import TOKEN_METADATA_KEY
 
 EXEMPT_METHODS = frozenset({
     "/auction.AuthService/Login",

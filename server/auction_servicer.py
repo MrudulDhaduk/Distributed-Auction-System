@@ -16,8 +16,8 @@ Command dataclasses are imported qualified as `commands.X`, not bare, so
 
 from auction import state as commands
 from auction.state import AuctionState
+from common import time_conv
 from generated import auction_pb2, auction_pb2_grpc
-from server import time_conv
 
 
 def _to_pb_result(result: commands.Result) -> auction_pb2.Result:
