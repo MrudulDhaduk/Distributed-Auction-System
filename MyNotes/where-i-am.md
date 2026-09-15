@@ -1,7 +1,8 @@
 # Where I am — revision note
 
-Written after a 10-day break. Covers Tasks 1 and 2 of 7. If I've been away
-again, read this first, then `grpc-notes.md` if the gRPC details have gone.
+Updated 2026-09-15. Covers Tasks 1–2 done, Task 3 in progress. If I've been
+away again, read this first, then `grpc-notes.md` if the gRPC details have
+gone.
 
 ---
 
@@ -42,7 +43,7 @@ right or three servers disagree.
 |---|---|---|
 | 1 | Auction state machine, `apply()`, concurrency | ✅ |
 | 2 | gRPC ping round-trip | ✅ |
-| 3 | Auth, sessions, real auction RPCs | ⬜ **next** |
+| 3 | Auth, sessions, real auction RPCs | 🟡 **in progress** |
 | 4 | LLM server | ⬜ |
 | 5 | Raft: leader election | ⬜ |
 | 6 | Raft: log replication | ⬜ |
@@ -51,7 +52,33 @@ right or three servers disagree.
 Plus the three extensions committed in the problem statement: live dashboard,
 acknowledged-bid property checker, seeded chaos harness.
 
-~10% of the code done. ~30% of the understanding. Raft is half the project.
+**Task 3, what's actually in**, per `git log`:
+- `sessions/store.py` — `SessionStore`: `create`/`validate`/`destroy`, opaque
+  tokens via `secrets.token_urlsafe`, no TTL (deferred on purpose — see the
+  docstring on clock skew across replicated sessions)
+- `server/auth_interceptor.py` — the one choke point that reads the token off
+  gRPC metadata, validates it, and stamps `context.username` before any
+  handler runs. `AuthService.Login` is the one exempt method.
+- `server/auth_servicer.py`, `server/auction_servicer.py` — `Login`/`Logout`
+  and `CreateAuction`/`PlaceBid`/`GetAuction`/`ListAuctions` all wired to
+  `AuctionState.apply()`. Bidder identity comes from `context.username`,
+  never from the request.
+- `CloseAuction` command (`auction/state.py`) — done and tested at the
+  `apply()` level (`tests/test_close_auction.py`, 8 cases: winner-by-highest-
+  not-last, reject-before-close-time, reject-double-close, zero-bid close,
+  bid-after-close via both the time guard and the `closed` flag).
+
+**Task 3, what's still open:**
+- `CloseAuction` has no trigger yet. Not an RPC, no timer in `serve.py`.
+  The design note in `proto/auction.proto` says M1 closes over a timer that
+  calls `apply(CloseAuction(...))` directly — that piece isn't built.
+- Uncommitted: a comment in `auction_servicer.py` on why `PlaceBid`'s
+  post-`apply()` read of `auction["bids"]` outside the lock is safe
+  (lock-free, possibly stale, never torn — `BidEntry` is frozen and
+  `list.append` is atomic under the GIL). Worth deciding: comment now, or
+  fold into the CloseAuction-trigger commit.
+
+~20% of the code done. ~35% of the understanding. Raft is half the project.
 
 **Milestone 1 (Sept 28)** = Tasks 3 and 4. No Raft.
 **Milestone 2 (Nov 18)** = Tasks 5–7.
@@ -391,9 +418,10 @@ producing something.
 
 # Next
 
-**Task 3** — auth, sessions, and the real auction RPCs over gRPC. Roughly:
-`login` issuing a token, token validation on every call, `logout`, then
-`CreateAuction`/`PlaceBid`/`GetAuction` as actual RPCs routed into `apply()`.
+**Finish Task 3** — auth, sessions, and the four auction RPCs are done and
+tested (see Status above). What's left: give `CloseAuction` a trigger. Decide
+timer-in-handler vs. something else, then wire it into `serve.py`. After
+that, Task 3 is closed and Task 4 (LLM server) is next.
 
 Still no Raft. Still one server.
 

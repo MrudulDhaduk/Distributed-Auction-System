@@ -65,6 +65,10 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
             curr_time=curr_time,
         )
         result = self._state.apply(command)
+
+        # Lock-free read: can be stale relative to `result`, never torn --
+        # list.append is atomic under the GIL and BidEntry is frozen, so an
+        # iterator only ever sees complete entries.
         auction = self._state.auctions.get(request.auction_id)
         high_bid = 0
         high_bidder = ""
