@@ -1,0 +1,281 @@
+syntax = "proto3";
+
+package llm;
+
+// Task 4: the LLM server. A separate process on its own node (handout §3,
+// Node 1), reached only over gRPC, providing the three domain-specific jobs
+// required by §4: a bidding FAQ assistant, item descriptions generated from
+// seller-supplied attributes, and summaries of auction results.
+//
+// This file deliberately does NOT import auction.proto. See the note on
+// AuctionContext below -- the coupling is the point being avoided.
+
+
+// === The rule this whole file exists to protect ===========================
+//
+// LLM OUTPUT NEVER ENTERS apply() AND NEVER ENTERS THE REPLICATED LOG.
+//
+// apply() is deterministic: no clocks, no randomness, no I/O (auction/
+// state.py). A model call is all three at once -- it is network I/O, it is
+// nondeterministic, and it takes four seconds. If apply() called the model,
+// three nodes replaying the same log would compute three different states,
+// and a node recovering six months from now would rebuild a state that
+// never existed.
+//
+// So the order is always: CALL FIRST, REPLICATE SECOND.
+//
+//   1. handler receives a create-auction request with seller attributes
+//   2. handler calls GenerateItemDescription -> "Mint-condition 1987 ..."
+//   3. handler proposes CreateAuction(..., description="Mint-condition ...")
+//      with that text frozen onto the command as PLAIN DATA
+//   4. apply() stores the string. It does not know an LLM exists.
+//
+// This is the same discipline as PlaceBid.curr_time: the nondeterministic
+// reading is taken once, outside apply(), and frozen onto the command. A
+// replay re-applies the stored text; it never re-calls the model.
+//
+// The FAQ and the summary jobs do not touch the log at all -- they are
+// read-side conveniences, generated per request and thrown away.
+
+
+// === Who calls this service ===============================================
+//
+// The application server, not the bidder. §4 says "invoked by the
+// application server over gRPC", and that is also why there is no auth
+// here: the session token issued by sessions/store.py identifies a
+// *bidder*, and the bidder is not the caller. (common/wire.py owns only
+// where that token travels -- the metadata key.) server/auth_interceptor.py
+// guards the client-facing services (Login exempted); this one sits behind
+// them on the internal network and is never exposed to clients.
+//
+// If it ever were exposed, the credential would be a service identity
+// (mTLS, or a shared secret in metadata), not a user session token.
+
+
+// === Failures: why there is no Result message in this file ================
+//
+// auction.proto has a Result on every response because a rejected bid is a
+// decision the auction MADE -- "no, too low" is information about the
+// domain. The rule there was: expected outcome -> body, could not process
+// at all -> gRPC status.
+//
+// A dead or hung model is the second category, not the first. Nothing was
+// decided; the question was simply never answered. So failures here are
+// status codes, and the responses below carry no Result field:
+//
+//   UNAVAILABLE         Ollama is not running / connection refused
+//   DEADLINE_EXCEEDED   model exceeded the 30s client timeout
+//                       (docs/design-notes.md: a backstop against a hung
+//                       daemon, not a latency target)
+//   FAILED_PRECONDITION model not installed -- misconfiguration, so a
+//                       retry will not help
+//   INVALID_ARGUMENT    empty question, no attributes, malformed message
+//   INTERNAL            a bug on the LLM server
+//
+// The consequence the application server must honour: catch grpc.RpcError
+// and DEGRADE. Show the auction without a generated description. An LLM
+// outage must never block a bid -- bids are the correctness properties in
+// §2; descriptions are a convenience.
+//
+// The one thing that WOULD belong in a body here is a model refusal ("that
+// is outside what I can help with") -- that is a decision, so it is the
+// Result-shaped case. Left out until a job actually needs it, rather than
+// adding a field on the guess.
+
+
+// --- Service --------------------------------------------------------------
+
+// The handout prescribes a client-facing wrapper:
+//
+//   getLLMAnswer(requestId, query, context)
+//       -> getLLMAnswerResponse(requestId, answer)
+//
+// Same treatment as post()/get() in auction.proto: the wrapper signature is
+// preserved at the client layer and dispatches to typed RPCs on the wire.
+//
+//   getLLMAnswer(id, <bidder's question>, <live auction state>)
+//                                        -> AnswerBiddingQuestion
+//   getLLMAnswer(id, -,                   <seller attributes>)
+//                                        -> GenerateItemDescription
+//   getLLMAnswer(id, -,                   <closed auction + bid history>)
+//                                        -> SummariseAuctionResult
+//
+// Collapsing these into one method was considered and rejected. Two of the
+// three jobs have no `query` at all -- you would have to invent one
+// ("describe this item") and let `context` mean three unrelated things,
+// which is the untyped-payload-plus-discriminator shape auction.proto
+// already turned down. Every request below still carries request_id and
+// every response still returns request_id and answer, so the handout's
+// contract holds field for field.
+service LLMService {
+  // (a) Bidding-assistant FAQ chatbot.
+  rpc AnswerBiddingQuestion(BiddingQuestionRequest)
+      returns (LLMAnswerResponse);
+
+  // (b) Item description from seller-supplied attributes.
+  rpc GenerateItemDescription(ItemDescriptionRequest)
+      returns (LLMAnswerResponse);
+
+  // (c) Summarisation of auction results and price history.
+  rpc SummariseAuctionResult(AuctionSummaryRequest)
+      returns (LLMAnswerResponse);
+}
+
+
+// --- Correlation ----------------------------------------------------------
+//
+// Every request carries a request_id and every response echoes it. What it
+// is NOT, since all three are tempting wrong answers:
+//
+//   - not a Raft dedup key. These calls never reach the log.
+//   - not idempotency. This server is stateless; a repeated call mutates
+//     nothing, so at-most-once delivery has no meaning here.
+//   - not needed to match response to request. gRPC unary already does
+//     that on the call itself.
+//
+// What it IS: the one value that appears in BOTH processes' logs. The
+// application server logs "handling PlaceBid, asked LLM 7f3a...", the LLM
+// server logs "7f3a...: prompt, 4.2s". Without it, the chaos harness
+// running concurrent bidders leaves the LLM log an undifferentiated pile of
+// prompts that cannot be tied back to any user-visible answer. Nothing
+// breaks functionally without it; traceability does.
+//
+// Minted by the APPLICATION SERVER, the gRPC caller -- not by the bidder
+// (who could collide ids on purpose and poison the correlation) and not by
+// the LLM server (an id created there cannot appear in the caller's
+// outbound log line, which is exactly where it is needed).
+//
+// Opaque string, uuid4. A string rather than an int64 so any caller can
+// mint one with no coordination and no shared counter.
+
+
+// --- Context: how "context-aware" is actually delivered -------------------
+//
+// §4: "Context awareness is achieved by injecting live auction state into
+// the prompt rather than answering from the model's own knowledge."
+//
+// That state is passed as STRUCTURED FIELDS, not as a pre-formatted prompt
+// string, for two reasons:
+//
+//   1. Trust boundary. A bidder's question is untrusted text; auction state
+//      is server-generated. Pre-concatenating them into one string destroys
+//      the distinction before the LLM server can see it. Kept apart on the
+//      wire, the server can place them differently in the prompt -- state
+//      as system context, question as user turn.
+//   2. Prompt assembly stays in one testable place (the LLM server)
+//      instead of being duplicated at three call sites.
+//
+// AuctionContext is defined HERE rather than importing auction.Auction on
+// purpose. It is a deliberately lossy PROJECTION for the model, not the
+// auction's data model: no bid list, no settlement detail, nothing the
+// prompt does not read. Importing auction.proto would mean every M2 change
+// to Auction regenerates and redeploys the LLM server for fields the model
+// never looks at.
+//
+// The cost, stated honestly: a hand-written mapper in the application
+// server, which can drift from Auction without the compiler noticing.
+message AuctionContext {
+  int64 auction_id = 1;
+  string item = 2;
+  // Epoch microseconds UTC, same representation as auction.proto -- one
+  // time format from the wire to the log. The LLM server renders it for
+  // the prompt; it never compares it to its own clock.
+  int64 close_time = 3;
+  // Stored state, copied from the auction's applied CloseAuction -- NOT
+  // recomputed here by comparing close_time to now(). Correctness property
+  // 4: expiry is decided once, by the cluster. A second opinion formed on
+  // the LLM node's clock would be exactly the bug that property forbids.
+  bool closed = 4;
+  int64 current_high_bid = 5;
+  // A count, not the bids themselves. AuctionContext is the view SHARED by
+  // all three jobs, so it carries only what the narrowest of them needs --
+  // the FAQ job answers "how much competition is there?" from a number and
+  // has no use for a bid list. This is scope, not privacy: the summary job
+  // does get per-bid detail, names included, on bid_history below.
+  int64 bid_count = 6;
+}
+
+// One seller-supplied attribute, e.g. ("condition", "mint"). A repeated
+// key/value rather than a fixed schema because the attribute set is the
+// seller's, not ours -- a 1987 guitar and a used laptop share no fields.
+message Attribute {
+  string key = 1;
+  string value = 2;
+}
+
+// A single point in the price history, for the summary job. Local to this
+// file for the same reason as AuctionContext; it mirrors auction.Bid today
+// but is free to diverge without dragging auction.proto along.
+message BidPoint {
+  string bidder = 1;
+  int64 amount = 2;
+  int64 time = 3;                 // epoch microseconds UTC
+}
+
+
+// --- Requests -------------------------------------------------------------
+
+message BiddingQuestionRequest {
+  string request_id = 1;
+  // The bidder's question, verbatim. UNTRUSTED -- it originates outside the
+  // system and is the only field in this file that does. The LLM server
+  // must treat it as data to answer, never as instructions about how to
+  // behave.
+  string question = 2;
+  // Optional. Unset for a general question ("how does a reserve price
+  // work?"); set when the bidder is asking about a specific auction ("am I
+  // still leading?"), which is the case §4 means by context-aware.
+  AuctionContext auction = 3;
+}
+
+message ItemDescriptionRequest {
+  string request_id = 1;
+  // What the seller is listing, e.g. "1987 Fender Stratocaster".
+  string item = 2;
+  // The seller's attributes. An empty list is INVALID_ARGUMENT: with
+  // nothing to work from the model would invent the item's properties, and
+  // an invented description becomes a listing a bidder relies on.
+  repeated Attribute attributes = 3;
+  // No AuctionContext: the auction does not exist yet. This call happens
+  // BEFORE the CreateAuction command is proposed -- see the ordering note
+  // at the top of this file. The returned text is then carried on that
+  // command as plain data.
+}
+
+message AuctionSummaryRequest {
+  string request_id = 1;
+  // Normally a closed auction (closed=true, the settled result), but a
+  // mid-auction summary is legitimate too -- the model is told which by
+  // the `closed` field rather than inferring it from the time.
+  AuctionContext auction = 2;
+  // The price history §4 asks to summarise, in the order the bids were
+  // applied. Deliberately separate from AuctionContext so the FAQ job,
+  // which has no use for it, does not carry it.
+  repeated BidPoint bid_history = 3;
+}
+
+
+// --- Response -------------------------------------------------------------
+
+// One response type for all three RPCs: this is the handout's
+// getLLMAnswerResponse(requestId, answer), unchanged.
+//
+// Shared rather than split three ways because the three jobs genuinely do
+// return the same thing -- generated prose. The variation between them is
+// entirely in prompt construction, which is server-side logic, not wire
+// shape. If a job later needs its own field (a suggested title, structured
+// price statistics), it gets its own response message then.
+message LLMAnswerResponse {
+  // Echoed from the request. See the correlation note above.
+  string request_id = 1;
+
+  // The generated text. PLAIN DATA -- whatever the caller does with this
+  // (show it, or freeze it onto a Command), it arrives as a string with no
+  // special status. Nothing downstream ever re-runs the model to reproduce
+  // it.
+  //
+  // No Result field: see the failure note at the top. If this response
+  // arrives at all, the model answered. If it did not answer, the call
+  // fails with a status code instead.
+  string answer = 2;
+}
