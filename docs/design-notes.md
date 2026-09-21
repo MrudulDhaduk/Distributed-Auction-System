@@ -100,3 +100,64 @@ every node computes the same result from the same command, and
 let a late bid through. It's just worth knowing that "the cluster's
 recorded close time" and "true wall-clock time" can differ by however
 skewed that one node's clock is.
+
+## Choosing the local LLM: why not qwen3:4b
+
+The LLM is used for auction descriptions and similar prose. It sits on the
+request path, so a slow or unpredictable call is a user-visible problem --
+and its output is replicated as plain data, so a response that carries
+stray formatting is a problem for the log too.
+
+`qwen3:4b` is a *hybrid reasoning* model: it decides per-response whether to
+write a `<think>` block first. On CPU that block is most of the latency.
+Two mechanisms are supposed to suppress it, and neither worked:
+
+- **`think=False` on the API call.** That tag's chat template ends with an
+  unconditional `<|im_start|>assistant\n<think>`, so generation always starts
+  inside a think block whatever the flag says. The flag only decides who
+  parses the closing tag. With `think=False`, Ollama does *not* split it out,
+  so the reasoning and a stray `</think>` land inline in `message.content` --
+  answers that open with "Okay, the user wants a two-sentence explanation".
+  Measured ~16-18s with ~1400 chars of reasoning inside the answer.
+  Re-verified on a fresh pull under Ollama 0.32.15; unchanged.
+- **`/no_think` in the prompt** (Qwen3's soft switch), combined with
+  `think=True` so Ollama splits the block out. This works, but only
+  sometimes: honoured in **3 of 6** runs. When honoured, 5.5-9.0s; when
+  ignored, 13-18s, indistinguishable from thinking left on.
+
+So the call was bimodal, roughly **5-24s**, and which mode you got was up to
+the model. A p50 that's fine and a p95 that isn't is not something to build a
+request path on, and the failure mode isn't just slowness -- an unsuppressed
+block also means reasoning text leaking into content we would then replicate.
+
+### What we use instead
+
+`qwen3:4b-instruct-2507-q4_K_M` -- the instruct-tuned variant of the same
+4B model at the same quantisation, so no change in memory footprint. It is
+not a hybrid model and never generates `<think>` blocks, which makes the
+suppression problem disappear rather than papering over it: the call is a
+plain `ollama.chat` with no thinking flag and no prompt switches. Its
+template confirms this, ending at a bare `<|im_start|>assistant\n` with no
+`<think>` prefill.
+
+Measured over 6 runs after a warm-up (`scripts/llm_smoke.py`):
+**min 3.83s, median 4.24s, max 5.45s, clean 6/6.** Both faster than the old
+best case and, more to the point, predictable.
+
+`qwen3:4b` is still installed; nothing depends on it.
+
+### Timeout
+
+The client is set to a **30s** timeout. That is deliberately far above the
+measured spread, because it is a backstop against a hung or dead daemon, not
+a latency target -- it should only ever fire when something is actually
+wrong, never on a merely slow-but-working call.
+
+Sizing it off the warm median (4.24s) would be wrong: Ollama unloads an idle
+model after ~5 minutes, so any call can be a cold one that pays the ~2.5 GB
+load cost again. Measured cold, after explicitly evicting the model: **7.40s**.
+30s is ~4x that worst realistic case, leaving room for a larger prompt or a
+longer answer than this smoke test's two sentences.
+
+If this ever needs to be tightened, the number to tighten against is the cold
+figure, not the warm one.
