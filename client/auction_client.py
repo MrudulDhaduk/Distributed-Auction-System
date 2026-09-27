@@ -1,6 +1,8 @@
-"""CLI client driving one end-to-end flow: login, create an auction, place
-a bid, then read it back. Same channel/stub shape as ping_client.py, but two
-services and a token that has to travel from step to step.
+"""CLI client driving one end-to-end flow: log in as a seller and two
+bidders, create an auction, place a couple of competing bids, wait for the
+server's own poll loop to close it, then read back the final result. Same
+channel/stub shape as ping_client.py, but two services and tokens that have
+to travel from step to step.
 
 Token placement mirrors server/auth_interceptor.py: every call except Login
 carries it as gRPC metadata under TOKEN_METADATA_KEY, never as a message
@@ -8,12 +10,22 @@ field.
 """
 
 import datetime
+import time
 
 import grpc
 
 from common import time_conv
 from common.wire import TOKEN_METADATA_KEY
 from generated import auction_pb2, auction_pb2_grpc
+
+# How far out to schedule the demo auction's close, measured from just
+# before CreateAuction is sent. Generous on purpose: CreateAuction blocks on
+# a synchronous LLM call for the description (attributes are supplied
+# below), and docs/design-notes.md measures that call at up to ~7.4s on a
+# cold model load. This margin has to clear that call PLUS both bids before
+# close_time, or PlaceBid would reject them as "Time is up" -- the same
+# deadline guard covers both real usage and this demo.
+DEMO_CLOSE_SECONDS = 25
 
 
 def _auth_metadata(token):
@@ -89,24 +101,31 @@ def main():
         auth_stub = auction_pb2_grpc.AuthServiceStub(channel)
         auction_stub = auction_pb2_grpc.AuctionServiceStub(channel)
 
-        token = do_login(auth_stub, "mrudul", "pass")
-        print(f"login token: {token}")
+        seller_token = do_login(auth_stub, "mrudul", "pass")
+        nisarg_token = do_login(auth_stub, "nisarg", "pass")
+        karan_token = do_login(auth_stub, "karan", "pass")
 
         close_time = time_conv.dt_to_micros(
-            time_conv.now_utc() + datetime.timedelta(hours=1)
+            time_conv.now_utc() + datetime.timedelta(seconds=DEMO_CLOSE_SECONDS)
         )
 
         create_response = do_create_auction(
-            auction_stub, token, 1, "vintage clock", close_time,
+            auction_stub, seller_token, 1, "vintage clock", close_time,
             attributes={"condition": "used, running order", "brand": "Seiko", "era": "1970s"},
         )
         print(f"create auction: {create_response}")
 
-        bid_response = do_place_bid(auction_stub, token, 1, 100)
-        print(f"place bid: {bid_response}")
+        bid_response = do_place_bid(auction_stub, nisarg_token, 1, 100)
+        print(f"place bid (nisarg, 100): {bid_response}")
 
-        auction = do_get_auction(auction_stub, token, 1)
-        print(f"auction: {auction}")
+        bid_response = do_place_bid(auction_stub, karan_token, 1, 150)
+        print(f"place bid (karan, 150): {bid_response}")
+
+        print(f"waiting for the auction to close ({DEMO_CLOSE_SECONDS + 2}s) ...")
+        time.sleep(DEMO_CLOSE_SECONDS + 2)
+
+        auction = do_get_auction(auction_stub, seller_token, 1)
+        print(f"final result: {auction}")
 
 
 if __name__ == "__main__":
