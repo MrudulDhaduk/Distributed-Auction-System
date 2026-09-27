@@ -6,11 +6,11 @@ Written against the real contract in auction/state.py:
 
 - AuctionState() holds the table; state.apply(command) is the single entry
   point and returns Result(success: bool, reason: str).
-- CreateAuction(auction_id: int, item: str, close_time: datetime)
+- CreateAuction(auction_id: int, item: str, close_time: datetime, description: str)
 - PlaceBid(auction_id: int, bidder: str, amount: int, curr_time: datetime)
 - CloseAuction(auction_id: int, curr_time: datetime)
-- state.auctions[auction_id] has keys: item, close_time, bids, closed,
-  winner, closed_at. Bids are BidEntry(bid_amount, bidder, time_stamp).
+- state.auctions[auction_id] has keys: item, close_time, description, bids,
+  closed, winner, closed_at. Bids are BidEntry(bid_amount, bidder, time_stamp).
 
 All timestamps below are fixed datetimes -- no datetime.now() -- so the tests
 are deterministic regardless of when they run.
@@ -28,7 +28,12 @@ LATER_STILL = datetime.datetime(2030, 1, 1, 14, 0, 0)
 
 def make_auction(state, auction_id=1, close_time=CLOSE_TIME):
     setup = state.apply(
-        CreateAuction(auction_id=auction_id, item="a signed copy of the Raft paper", close_time=close_time)
+        CreateAuction(
+            auction_id=auction_id,
+            item="a signed copy of the Raft paper",
+            close_time=close_time,
+            description="",
+        )
     )
     assert setup.success, f"auction setup failed: {setup.reason}"
 

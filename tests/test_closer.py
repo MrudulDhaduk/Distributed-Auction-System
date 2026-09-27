@@ -17,7 +17,12 @@ AFTER_CLOSE = datetime.datetime(2030, 1, 1, 13, 0, 0)
 
 def make_auction(state, auction_id=1, close_time=CLOSE_TIME):
     setup = state.apply(
-        CreateAuction(auction_id=auction_id, item="a signed copy of the Raft paper", close_time=close_time)
+        CreateAuction(
+            auction_id=auction_id,
+            item="a signed copy of the Raft paper",
+            close_time=close_time,
+            description="",
+        )
     )
     assert setup.success, f"auction setup failed: {setup.reason}"
 

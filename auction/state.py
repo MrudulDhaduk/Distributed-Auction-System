@@ -17,6 +17,11 @@ class CreateAuction:
     auction_id: int
     item: str
     close_time: datetime.datetime
+    # Generated server-side (LLMService.GenerateItemDescription) BEFORE
+    # this command is built, never inside apply() -- see llm.proto's
+    # ordering note. "" when no attributes were supplied or the LLM call
+    # failed; an outage must never block auction creation.
+    description: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,7 @@ class AuctionState:
                 self.auctions[command.auction_id] = {
                     "item": command.item,
                     "close_time": command.close_time,
+                    "description": command.description,
                     "bids": [],
                     "closed": False,
                     "winner": None,
