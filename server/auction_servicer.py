@@ -12,12 +12,25 @@ handler runs, so this class only needs AuctionState.
 Command dataclasses are imported qualified as `commands.X`, not bare, so
 `commands.CreateAuction` (the dataclass) can never be confused with
 `CreateAuction` (the RPC method below).
+
+CreateAuction also takes an LLMClient (server/llm_client.py). Call first,
+replicate second -- see llm.proto's ordering note: _describe() below runs
+BEFORE apply(), and its result is frozen onto the command as plain text.
+apply() never hears about the LLM call.
 """
+
+import logging
+import uuid
+
+import grpc
 
 from auction import state as commands
 from auction.state import AuctionState
 from common import time_conv
 from generated import auction_pb2, auction_pb2_grpc
+from server.llm_client import LLMClient
+
+logger = logging.getLogger(__name__)
 
 
 def _to_pb_result(result: commands.Result) -> auction_pb2.Result:
@@ -25,18 +38,54 @@ def _to_pb_result(result: commands.Result) -> auction_pb2.Result:
 
 
 class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
-    def __init__(self, state: AuctionState):
+    def __init__(self, state: AuctionState, llm_client: LLMClient):
         self._state = state
+        self._llm = llm_client
+
+    def _describe(self, request: auction_pb2.CreateAuctionRequest) -> str:
+        """Item description for a new auction, or "" on no attributes /
+        LLM outage. Runs before apply() -- see the module docstring.
+
+        No attributes supplied: skip the call outright rather than
+        invoking GenerateItemDescription with an empty list, which
+        llm_servicer.py always rejects as INVALID_ARGUMENT -- that would
+        be a guaranteed failure on every single call, not a real attempt.
+        """
+        if not request.attributes:
+            return ""
+
+        request_id = str(uuid.uuid4())
+        try:
+            return self._llm.get_llm_answer(
+                request_id=request_id,
+                query="",
+                context={
+                    "item": request.item,
+                    "attributes": dict(request.attributes),
+                },
+            )
+        except grpc.RpcError:
+            # An LLM outage must never block auction creation (llm.proto's
+            # failure note). Degrade to no description; the auction still
+            # gets created below.
+            logger.warning(
+                "LLM description generation failed (request_id=%s)",
+                request_id,
+                exc_info=True,
+            )
+            return ""
 
     def CreateAuction(
         self, request: auction_pb2.CreateAuctionRequest, context
     ) -> auction_pb2.CreateAuctionResponse:
         """Create an auction. All validation lives in apply()."""
         close_time = time_conv.micros_to_dt(request.close_time)
+        description = self._describe(request)
         command = commands.CreateAuction(
             auction_id=request.auction_id,
             item=request.item,
             close_time=close_time,
+            description=description,
         )
         result = self._state.apply(command)
         return auction_pb2.CreateAuctionResponse(
@@ -91,6 +140,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
             if auction is not None:
                 item = auction["item"]
                 close_time = auction["close_time"]
+                description = auction["description"]
                 closed = auction["closed"]
                 winner = auction["winner"]
                 entries = list(auction["bids"])
@@ -123,6 +173,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
             current_high_bidder=high_bidder,
             bids=pb_bids,
             winner=winner.bidder if winner is not None else "",
+            description=description,
         )
         return auction_pb2.GetAuctionResponse(
             result=auction_pb2.Result(success=True, reason="ok"),

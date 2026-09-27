@@ -15,19 +15,23 @@ from server.auction_servicer import AuctionServicer
 from server.auth_interceptor import AuthInterceptor
 from server.auth_servicer import AuthServicer
 from server.closer import AuctionCloser
+from server.llm_client import LLMClient
 
 
 def serve(port: int = 50051):
     sessions = SessionStore()
     state = AuctionState()
     closer = AuctionCloser(state)
+    llm_client = LLMClient()
 
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=4),
         interceptors=[AuthInterceptor(sessions)],
     )
     auction_pb2_grpc.add_AuthServiceServicer_to_server(AuthServicer(sessions), server)
-    auction_pb2_grpc.add_AuctionServiceServicer_to_server(AuctionServicer(state), server)
+    auction_pb2_grpc.add_AuctionServiceServicer_to_server(
+        AuctionServicer(state, llm_client), server
+    )
 
     server.add_insecure_port(f"[::]:{port}")
     server.start()

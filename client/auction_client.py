@@ -30,13 +30,17 @@ def do_login(stub, username, password):
     return response.token
 
 
-def do_create_auction(stub, token, auction_id, item, close_time):
-    # calls AuctionService.CreateAuction; returns the CreateAuctionResponse
+def do_create_auction(stub, token, auction_id, item, close_time, attributes=None):
+    # calls AuctionService.CreateAuction; returns the CreateAuctionResponse.
+    # attributes (seller-supplied, e.g. {"condition": "mint"}) drive the
+    # server-side LLM description -- see server/auction_servicer.py. Omit
+    # or pass {} to skip that call entirely.
     return stub.CreateAuction(
         auction_pb2.CreateAuctionRequest(
             auction_id=auction_id,
             item=item,
             close_time=close_time,
+            attributes=attributes or {},
         ),
         metadata=_auth_metadata(token),
     )
@@ -93,7 +97,8 @@ def main():
         )
 
         create_response = do_create_auction(
-            auction_stub, token, 1, "vintage clock", close_time
+            auction_stub, token, 1, "vintage clock", close_time,
+            attributes={"condition": "used, running order", "brand": "Seiko", "era": "1970s"},
         )
         print(f"create auction: {create_response}")
 
