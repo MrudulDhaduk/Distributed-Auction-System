@@ -17,6 +17,8 @@ class CreateAuction:
     auction_id: int
     item: str
     close_time: datetime.datetime
+    # Seller's username, from the validated token -- never from the request.
+    owner: str
     # Generated server-side (LLMService.GenerateItemDescription) BEFORE
     # this command is built, never inside apply() -- see llm.proto's
     # ordering note. "" when no attributes were supplied or the LLM call
@@ -81,13 +83,14 @@ class AuctionState:
                 self.auctions[command.auction_id] = {
                     "item": command.item,
                     "close_time": command.close_time,
+                    "owner": command.owner,
                     "description": command.description,
                     "bids": [],
                     "closed": False,
                     "winner": None,
                     "closed_at": None,
                 }
-                return Result(success=True, reason="Auction created successfully")
+                return Result(success=True, reason=f"Auction created successfully by {command.owner}")
 
             if isinstance(command, PlaceBid):
                 auction = self.auctions.get(command.auction_id)

@@ -6,7 +6,7 @@ Written against the real contract in auction/state.py:
 
 - AuctionState() holds the table; state.apply(command) is the single entry
   point and returns Result(success: bool, reason: str).
-- CreateAuction(auction_id: int, item: str, close_time: datetime, description: str)
+- CreateAuction(auction_id: int, item: str, close_time: datetime, owner: str, description: str)
 - PlaceBid(auction_id: int, bidder: str, amount: int, curr_time: datetime)
 - CloseAuction(auction_id: int, curr_time: datetime)
 - state.auctions[auction_id] has keys: item, close_time, description, bids,
@@ -32,6 +32,7 @@ def make_auction(state, auction_id=1, close_time=CLOSE_TIME):
             auction_id=auction_id,
             item="a signed copy of the Raft paper",
             close_time=close_time,
+            owner="seller",
             description="",
         )
     )

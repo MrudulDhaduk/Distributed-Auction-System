@@ -78,13 +78,18 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
     def CreateAuction(
         self, request: auction_pb2.CreateAuctionRequest, context
     ) -> auction_pb2.CreateAuctionResponse:
-        """Create an auction. All validation lives in apply()."""
+        """Create an auction. All validation lives in apply().
+
+        Owner comes from the validated token (context.username), never
+        from the request -- same rule as PlaceBid's bidder.
+        """
         close_time = time_conv.micros_to_dt(request.close_time)
         description = self._describe(request)
         command = commands.CreateAuction(
             auction_id=request.auction_id,
             item=request.item,
             close_time=close_time,
+            owner=context.username,
             description=description,
         )
         result = self._state.apply(command)

@@ -6,7 +6,7 @@ Written against the real contract in auction/state.py:
 
 - AuctionState() holds the table; state.apply(command) is the single entry
   point and returns Result(success: bool, reason: str).
-- CreateAuction(auction_id: int, item: str, close_time: datetime, description: str)
+- CreateAuction(auction_id: int, item: str, close_time: datetime, owner: str, description: str)
 - PlaceBid(auction_id: int, bidder: str, amount: int, curr_time: datetime)
   — apply() is deterministic, so the command carries its own timestamp.
 - History for an auction is state.auctions[auction_id]["bids"], a list of
@@ -61,6 +61,7 @@ def test_fifty_concurrent_equal_bids_exactly_one_wins(hair_trigger_thread_switch
             auction_id=auction_id,
             item="a signed copy of the Raft paper",
             close_time=CLOSE_TIME,
+            owner="seller",
             description="",
         )
     )

@@ -30,6 +30,16 @@ class FakeLLMClient:
         return self.answer
 
 
+class FakeContext:
+    """Stands in for the gRPC context after the auth interceptor has
+    resolved the token to a username."""
+
+    username = "nisarg"
+
+
+CTX = FakeContext()
+
+
 @pytest.fixture
 def llm():
     return FakeLLMClient()
@@ -43,7 +53,7 @@ def servicer(llm):
 def test_no_attributes_skips_llm_call_and_creates_with_empty_description(servicer, llm):
     response = servicer.CreateAuction(
         auction_pb2.CreateAuctionRequest(auction_id=1, item="vintage clock", close_time=0),
-        context=None,
+        context=CTX,
     )
 
     assert response.result.success
@@ -52,12 +62,22 @@ def test_no_attributes_skips_llm_call_and_creates_with_empty_description(service
     assert auction["description"] == ""
 
 
+def test_owner_comes_from_context_and_is_named_in_the_result(servicer, llm):
+    response = servicer.CreateAuction(
+        auction_pb2.CreateAuctionRequest(auction_id=1, item="vintage clock", close_time=0),
+        context=CTX,
+    )
+
+    assert response.result.reason == "Auction created successfully by nisarg"
+    assert servicer._state.auctions[1]["owner"] == "nisarg"
+
+
 def test_attributes_present_calls_llm_and_stores_returned_description(servicer, llm):
     request = auction_pb2.CreateAuctionRequest(
         auction_id=1, item="1987 Fender Stratocaster", close_time=0,
         attributes={"condition": "mint"},
     )
-    response = servicer.CreateAuction(request, context=None)
+    response = servicer.CreateAuction(request, context=CTX)
 
     assert response.result.success
     assert len(llm.calls) == 1
@@ -75,7 +95,7 @@ def test_llm_outage_degrades_to_empty_description_auction_still_created(servicer
         attributes={"condition": "mint"},
     )
 
-    response = servicer.CreateAuction(request, context=None)
+    response = servicer.CreateAuction(request, context=CTX)
 
     assert response.result.success, "an LLM outage must never block auction creation"
     auction = servicer._state.auctions[1]
@@ -87,7 +107,7 @@ def test_get_auction_returns_stored_description(servicer, llm):
         auction_id=1, item="1987 Fender Stratocaster", close_time=0,
         attributes={"condition": "mint"},
     )
-    servicer.CreateAuction(request, context=None)
+    servicer.CreateAuction(request, context=CTX)
 
     response = servicer.GetAuction(
         auction_pb2.GetAuctionRequest(auction_id=1), context=None

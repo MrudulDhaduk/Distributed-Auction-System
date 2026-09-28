@@ -21,6 +21,7 @@ def make_auction(state, auction_id=1, close_time=CLOSE_TIME):
             auction_id=auction_id,
             item="a signed copy of the Raft paper",
             close_time=close_time,
+            owner="seller",
             description="",
         )
     )
