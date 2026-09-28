@@ -105,11 +105,12 @@ auction to close on its own, then reads back the final result. This is what
 running it looks like and what each block of output means.
 
 **1. Login.** Three of this project's seeded accounts log in (see
-`server/auth_servicer.py`'s `_USERS`: `mrudul`/`nisarg`/`karan`, all with
-password `pass`) -- `mrudul` as the seller, `nisarg` and `karan` as
+`server/auth_servicer.py`'s `_USERS`: `mrudul`/`nisarg`/`karan`/`tanmay`, all with
+password `pass`) -- `nisarg` as the seller, `mrudul`, `tanmay`  and `karan` as
 competing bidders:
 
 ```
+login: True - your session is created
 login: True - your session is created
 login: True - your session is created
 login: True - your session is created
@@ -130,29 +131,48 @@ depending on whether the model is already warm:
 ```
 create auction: result {
   success: true
-  reason: "Auction created successfully"
+  reason: "Auction created successfully by nisarg"
 }
 auction_id: 1
 ```
 
-**3. Place a couple of bids.** `nisarg` bids 100, then `karan` outbids with
-150:
+**3. Place a couple of bids.** `karana` bids 100, then `mrudul` outbids with
+200:
 
 ```
-place bid (nisarg, 100): result {
-  success: true
-  reason: "Bid of 100 added"
-}
-current_high_bid: 100
-current_high_bidder: "nisarg"
-
 place bid (karan, 150): result {
   success: true
   reason: "Bid of 150 added"
 }
 current_high_bid: 150
 current_high_bidder: "karan"
+
+place bid (mrudul, 200): result {
+  success: true
+  reason: "Bid of 200 added"
+}
+current_high_bid: 200
+current_high_bidder: "mrudul"
+
+place bid (tanmay, 200): result {
+  reason: "Bid of 200 is not added because current highest bid is 200"
+}
+current_high_bid: 200
+current_high_bidder: "mrudul"
+
 ```
+
+Tanmay's bid is rejected because a bid has to be strictly higher than the
+current high bid (`auction/state.py`'s `PlaceBid` branch), so a tie loses
+to whoever got there first. The rejected bid is never added to the
+auction's bid history, which is why it doesn't appear in the final result
+below.
+
+Note: the rejected response has no `success: false` line. That's not a
+missing field -- protobuf's text format leaves out any field set to its
+default value, and `false` is the default for a `bool`. The same thing
+happens to `0` and `""` elsewhere in the output.
+
 
 **4. Wait for it to close.** There is no client-facing "close now" call --
 closing is a decision the cluster makes once, on its own schedule (see
