@@ -101,9 +101,10 @@ def main():
         auth_stub = auction_pb2_grpc.AuthServiceStub(channel)
         auction_stub = auction_pb2_grpc.AuctionServiceStub(channel)
 
-        seller_token = do_login(auth_stub, "mrudul", "pass")
-        nisarg_token = do_login(auth_stub, "nisarg", "pass")
+        seller_token = do_login(auth_stub, "nisarg", "pass")
+        mrudul_token = do_login(auth_stub, "mrudul", "pass")
         karan_token = do_login(auth_stub, "karan", "pass")
+        tanmay_token = do_login(auth_stub, "tanmay", "pass")
 
         close_time = time_conv.dt_to_micros(
             time_conv.now_utc() + datetime.timedelta(seconds=DEMO_CLOSE_SECONDS)
@@ -115,11 +116,14 @@ def main():
         )
         print(f"create auction: {create_response}")
 
-        bid_response = do_place_bid(auction_stub, nisarg_token, 1, 100)
-        print(f"place bid (nisarg, 100): {bid_response}")
-
         bid_response = do_place_bid(auction_stub, karan_token, 1, 150)
         print(f"place bid (karan, 150): {bid_response}")
+
+        bid_response = do_place_bid(auction_stub, mrudul_token, 1, 200)
+        print(f"place bid (mrudul, 200): {bid_response}")
+
+        bid_response = do_place_bid(auction_stub, tanmay_token, 1, 200)
+        print(f"place bid (tanmay, 200): {bid_response}")
 
         print(f"waiting for the auction to close ({DEMO_CLOSE_SECONDS + 2}s) ...")
         time.sleep(DEMO_CLOSE_SECONDS + 2)

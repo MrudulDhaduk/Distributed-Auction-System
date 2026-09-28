@@ -5,9 +5,7 @@ Systems). This submission covers **Milestone 1**: gRPC services, session
 authentication, the core auction logic (create, bid, close), and an LLM
 integration that generates item descriptions from seller-supplied
 attributes. Everything runs as a single auction-server process today --
-**Raft-based replication across multiple nodes is Milestone 2** and is not
-part of this submission. See [CLAUDE.md](CLAUDE.md) for the full build
-order and design constraints.
+**Raft-based replication across multiple nodes is Milestone 2** and is not part of this submission.
 
 ## Setup
 

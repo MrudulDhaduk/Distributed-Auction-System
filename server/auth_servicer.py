@@ -13,6 +13,7 @@ _USERS = {
     "mrudul": "pass",
     "nisarg": "pass",
     "karan": "pass",
+    "tanmay": "pass",
 }
 
 class AuthServicer(auction_pb2_grpc.AuthServiceServicer):
