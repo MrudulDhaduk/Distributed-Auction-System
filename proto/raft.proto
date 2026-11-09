@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package raft;
+
+// The two Raft RPCs of Figure 2 (Ongaro & Ousterhout), kept out of
+// auction.proto as that file's header promises. Peers call each other
+// directly; clients never see this service.
+//
+// Signatures are the course handout's:
+//
+//   RequestVote(from, to, term, lastLogIndex, lastLogTerm)
+//       -> (from, to, term, voteGranted)
+//   AppendEntries(from, to, term, prevIndex, prevTerm, commitIndex, entries)
+//       -> (from, to, term, entryAppended, matchIndex)
+//
+// Field names follow the handout exactly (camelCase and all) with ONE
+// exception: `from` is a Python keyword, so a generated `from` attribute
+// can only be reached through getattr() and cannot be passed as a
+// constructor keyword at all. It is `from_id` here. `to` is not a keyword
+// and stays `to`. (docs/decisions.md, "Election", records why not rename
+// both for symmetry.)
+//
+// `term` rides on every message in both directions: the "any RPC request
+// or response with term > currentTerm" rule of Figure 2 ("Rules for
+// Servers", All Servers) must be applicable on the reply path as well as
+// the request path.
+//
+// Election-only chunk: AppendEntries is a pure heartbeat. `entries` is
+// always empty, prevIndex/prevTerm/commitIndex are always 0, and
+// entryAppended/matchIndex are filled in but carry nothing yet.
+
+
+service RaftService {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+
+message RequestVoteRequest {
+  string from_id = 1;       // handout: from  (the candidate)
+  string to = 2;
+  int64 term = 3;           // candidate's term
+  int64 lastLogIndex = 4;   // index of candidate's last log entry (0: empty log)
+  int64 lastLogTerm = 5;    // term of candidate's last log entry (0: empty log)
+}
+
+message RequestVoteResponse {
+  string from_id = 1;       // handout: from  (the voter)
+  string to = 2;
+  int64 term = 3;          // voter's currentTerm after processing the request
+  bool voteGranted = 4;
+}
+
+
+// Placeholder shape for log entries so that `entries` has a type. Nothing
+// puts one on the wire in this chunk; the log-replication step decides the
+// real contents. `command` is opaque bytes: the Raft layer never looks
+// inside, and (CLAUDE.md) LLM output only ever enters the log as already-
+// generated plain data.
+message LogEntry {
+  int64 term = 1;
+  bytes command = 2;
+}
+
+message AppendEntriesRequest {
+  string from_id = 1;       // handout: from  (the leader)
+  string to = 2;
+  int64 term = 3;           // leader's term
+  int64 prevIndex = 4;      // index of log entry preceding the new ones
+  int64 prevTerm = 5;       // term of that entry
+  int64 commitIndex = 6;    // leader's commitIndex
+  repeated LogEntry entries = 7;   // empty in this chunk (heartbeat)
+}
+
+message AppendEntriesResponse {
+  string from_id = 1;       // handout: from  (the follower)
+  string to = 2;
+  int64 term = 3;           // follower's currentTerm after processing
+  bool entryAppended = 4;   // handout name for Figure 2's `success`
+  int64 matchIndex = 5;
+}
