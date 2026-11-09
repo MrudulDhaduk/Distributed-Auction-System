@@ -78,17 +78,24 @@ You should see:
 2026-... INFO llm server listening on port 50052, model qwen3:4b-instruct-2507-q4_K_M
 ```
 
-**Terminal 2 -- auction server**:
+**Terminal 2 -- the auction cluster** (M2: three Raft nodes, each an auction
+server). The script opens one window per node; each keeps its log in
+`data\<id>` and serves clients on 50071-50073 (Raft peers talk on
+50061-50063). It also starts the LLM server, so skip Terminal 1 if you use it,
+or pass `-NoLLM`:
 
 ```powershell
-python -m server.serve
+.\scripts\run_cluster.ps1 -NoLLM
 ```
 
-You should see:
+Each node logs its role changes, e.g.
 
 ```
-auction server listening on port 50051
+12:00:01.234 [n2] term 1 CANDIDATE -> LEADER: won election with 2 votes
 ```
+
+Close the leader's window at any point to watch failover. The client
+follows. See [docs/auction-on-raft.md](docs/auction-on-raft.md), section 14.
 
 **Terminal 3 -- client demo**:
 
