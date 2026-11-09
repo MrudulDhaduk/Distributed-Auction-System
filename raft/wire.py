@@ -10,6 +10,7 @@ from generated import raft_pb2
 from raft.messages import (
     AppendEntriesArgs,
     AppendEntriesReply,
+    LogEntry,
     RequestVoteArgs,
     RequestVoteReply,
 )
@@ -47,9 +48,18 @@ def vote_reply_from_wire(m: raft_pb2.RequestVoteResponse) -> RequestVoteReply:
     )
 
 
+def entry_to_wire(e: LogEntry) -> raft_pb2.LogEntry:
+    # Python calls the payload `data`; the proto calls it `command`, Figure
+    # 2's word ("each entry contains command for state machine"). Either
+    # way it is opaque bytes, copied unchanged.
+    return raft_pb2.LogEntry(term=e.term, command=e.data)
+
+
+def entry_from_wire(m: raft_pb2.LogEntry) -> LogEntry:
+    return LogEntry(term=m.term, data=m.command)
+
+
 def append_args_to_wire(a: AppendEntriesArgs) -> raft_pb2.AppendEntriesRequest:
-    # entries stays empty in the election-only chunk; the log-replication
-    # step converts LogEntry <-> wire here.
     return raft_pb2.AppendEntriesRequest(
         from_id=a.from_id,
         to=a.to,
@@ -57,6 +67,7 @@ def append_args_to_wire(a: AppendEntriesArgs) -> raft_pb2.AppendEntriesRequest:
         prevIndex=a.prev_index,
         prevTerm=a.prev_term,
         commitIndex=a.commit_index,
+        entries=[entry_to_wire(e) for e in a.entries],
     )
 
 
@@ -68,7 +79,7 @@ def append_args_from_wire(m: raft_pb2.AppendEntriesRequest) -> AppendEntriesArgs
         prev_index=m.prevIndex,
         prev_term=m.prevTerm,
         commit_index=m.commitIndex,
-        entries=tuple(m.entries),
+        entries=tuple(entry_from_wire(e) for e in m.entries),
     )
 
 

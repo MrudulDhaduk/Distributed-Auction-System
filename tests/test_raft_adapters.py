@@ -12,6 +12,7 @@ from raft import wire
 from raft.messages import (
     AppendEntriesArgs,
     AppendEntriesReply,
+    LogEntry,
     RequestVoteArgs,
     RequestVoteReply,
 )
@@ -31,6 +32,19 @@ def test_wire_round_trips_every_message():
     assert wire.vote_reply_from_wire(wire.vote_reply_to_wire(vr)) == vr
     assert wire.append_args_from_wire(wire.append_args_to_wire(aa)) == aa
     assert wire.append_reply_from_wire(wire.append_reply_to_wire(ar)) == ar
+
+
+def test_wire_round_trips_entries_as_opaque_bytes():
+    # Arbitrary bytes, including ones that are not valid UTF-8: the Raft
+    # layer must carry them without interpreting them.
+    es = (LogEntry(1, b"\x00\xff raw"), LogEntry(3, b""), LogEntry(3, "bid".encode()))
+    aa = AppendEntriesArgs("n1", "n2", 3, 4, 1, 2, es)
+
+    m = wire.append_args_to_wire(aa)
+    assert [(e.term, e.command) for e in m.entries] == [(1, b"\x00\xff raw"), (3, b""), (3, b"bid")]
+    back = wire.append_args_from_wire(raft_pb2.AppendEntriesRequest.FromString(m.SerializeToString()))
+    assert back == aa
+    assert all(isinstance(e, LogEntry) for e in back.entries)
 
 
 def test_wire_uses_the_handouts_field_names():

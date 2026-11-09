@@ -49,9 +49,10 @@ class RaftServiceStub:
     Servers", All Servers) must be applicable on the reply path as well as
     the request path.
 
-    Election-only chunk: AppendEntries is a pure heartbeat. `entries` is
-    always empty, prevIndex/prevTerm/commitIndex are always 0, and
-    entryAppended/matchIndex are filled in but carry nothing yet.
+    AppendEntries carries log entries (replication, section 5.3) or none at
+    all (a heartbeat, 5.2). entryAppended is Figure 2's `success`; on success
+    matchIndex = prevIndex + len(entries), the last index the follower has
+    verified to match the leader's log (0 on failure).
 
     """
 
@@ -97,9 +98,10 @@ class RaftServiceServicer:
     Servers", All Servers) must be applicable on the reply path as well as
     the request path.
 
-    Election-only chunk: AppendEntries is a pure heartbeat. `entries` is
-    always empty, prevIndex/prevTerm/commitIndex are always 0, and
-    entryAppended/matchIndex are filled in but carry nothing yet.
+    AppendEntries carries log entries (replication, section 5.3) or none at
+    all (a heartbeat, 5.2). entryAppended is Figure 2's `success`; on success
+    matchIndex = prevIndex + len(entries), the last index the follower has
+    verified to match the leader's log (0 on failure).
 
     """
 
@@ -160,9 +162,10 @@ class RaftService:
     Servers", All Servers) must be applicable on the reply path as well as
     the request path.
 
-    Election-only chunk: AppendEntries is a pure heartbeat. `entries` is
-    always empty, prevIndex/prevTerm/commitIndex are always 0, and
-    entryAppended/matchIndex are filled in but carry nothing yet.
+    AppendEntries carries log entries (replication, section 5.3) or none at
+    all (a heartbeat, 5.2). entryAppended is Figure 2's `success`; on success
+    matchIndex = prevIndex + len(entries), the last index the follower has
+    verified to match the leader's log (0 on failure).
 
     """
 

@@ -33,6 +33,21 @@ class RequestVoteReply:
 
 
 @dataclass(frozen=True)
+class LogEntry:
+    """One slot of Figure 2's log[]: "each entry contains command for state
+    machine, and term when entry was received by leader".
+
+    `data` is opaque bytes. Raft copies it, stores it, compares terms --
+    and never looks inside. What the bytes mean (and whether the command
+    they encode succeeds) is decided later by apply_fn. The log holds
+    attempts; apply() decides outcomes. (docs/decisions.md, R1)
+    """
+
+    term: int
+    data: bytes
+
+
+@dataclass(frozen=True)
 class AppendEntriesArgs:
     from_id: str
     to: str
@@ -40,8 +55,9 @@ class AppendEntriesArgs:
     prev_index: int
     prev_term: int
     commit_index: int
-    # Always () in the election-only chunk (heartbeats). A tuple, not a
-    # list, so the frozen dataclass really is immutable.
+    # LogEntry objects for indexes prev_index+1, prev_index+2, ... Empty for
+    # a heartbeat. A tuple, not a list, so the frozen dataclass really is
+    # immutable.
     entries: tuple = ()
 
 
