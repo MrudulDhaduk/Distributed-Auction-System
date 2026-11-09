@@ -132,6 +132,27 @@ class RoleChange:
         return f"{line}: {self.reason}"
 
 
+class ReadOutcome(enum.Enum):
+    """How read_index() ended. Only OK lets the caller read its state."""
+
+    OK = "OK"
+    NOT_LEADER = "NOT_LEADER"            # refused at once; leader_hint may help
+    LEADERSHIP_LOST = "LEADERSHIP_LOST"  # deposed (or a new term) while waiting
+    TIMEOUT = "TIMEOUT"                  # no majority confirmed us in time
+    STOPPED = "STOPPED"
+
+
+@dataclasses.dataclass(frozen=True)
+class ReadIndex:
+    outcome: ReadOutcome
+    index: int = 0  # the read index; meaningful only when outcome is OK
+    leader_hint: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome is ReadOutcome.OK
+
+
 @dataclasses.dataclass(frozen=True)
 class NodeStatus:
     """A consistent snapshot, taken under the lock."""
@@ -218,11 +239,21 @@ class RaftNode:
         self._ae_in_flight: set = set()  # peers with an unanswered AppendEntries
         self._pending: dict = {}  # log index -> Proposal; leader only
 
+        # Read-index (section 8; see read_index). Leader only, reset in
+        # _become_leader except the round counter, which only ever grows.
+        self._term_start_index = 0  # index of this term's no-op
+        self._read_round = 0  # bumped by every read_index() call
+        self._sent_round: dict = {}  # peer -> _read_round when its in-flight AE was built
+        self._acked_round: dict = {}  # peer -> highest round it answered in this term
+
         # Cluster of N = peers + self; a majority is more than half.
         self._majority = (len(self._peers) + 1) // 2 + 1
 
         self._lock = threading.Lock()
         self._applier_wake = threading.Condition(self._lock)
+        # Wakes read_index() waiters: commitIndex, lastApplied, an ack, a
+        # change of role or term, stop. notify_all: there can be many.
+        self._read_wake = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._ticker: Optional[threading.Thread] = None
         self._applier: Optional[threading.Thread] = None
@@ -270,6 +301,7 @@ class RaftNode:
         self._stop.set()
         with self._lock:
             self._applier_wake.notify_all()
+            self._read_wake.notify_all()
             self._fail_pending(Outcome.STOPPED)
         for thread in (self._ticker, self._applier):
             if thread is not None and thread is not threading.current_thread():
@@ -322,6 +354,88 @@ class RaftNode:
         for peer, args in sends:
             self._submit(self._send_append, peer, args)
         return p
+
+    # --- linearizable reads without the log (section 8) ----------------------
+
+    def read_index(self, timeout: float) -> ReadIndex:
+        """Section 8: "Read-only operations can be handled without writing
+        anything into the log", given "two extra precautions". Blocks for
+        at most `timeout` seconds. On OK, every entry committed before this
+        call started has been applied here, and the caller may read its
+        state machine. (The "record commitIndex, then confirm" ordering is
+        the read-index algorithm of Ongaro's thesis, section 6.4; the
+        paper states the two precautions. docs/decisions.md, A14.)
+
+          1. Not leader: NOT_LEADER at once.
+          2. Precaution one, "a leader must have the latest information on
+             which entries are committed": wait until this term's no-op
+             (R9) is committed. Before that, a new leader's commitIndex can
+             be BEHIND entries the previous leader committed and
+             acknowledged.
+          3. readIndex = commitIndex.
+          4. Precaution two, "a leader must check whether it has been
+             deposed": start a new heartbeat round and wait until a
+             majority, counting ourselves, has answered an AppendEntries
+             built AFTER step 3 with our term. Each such answer shows that
+             node had not moved to a later term when it answered, i.e.
+             after this read began; a newer leader needs a majority of
+             votes in a later term, and two majorities overlap. So no newer
+             leader existed when the read began, and none had committed
+             anything we lack.
+          5. Wait until lastApplied >= readIndex.
+
+        Leadership must hold through steps 2-4 (LEADERSHIP_LOST otherwise).
+        Step 5 is local: entries up to readIndex are committed, so applying
+        them is correct even if we are deposed meanwhile.
+        """
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            if self._stop.is_set():
+                return ReadIndex(ReadOutcome.STOPPED)
+            if self._role != Role.LEADER:
+                return ReadIndex(ReadOutcome.NOT_LEADER, leader_hint=self._leader_id)
+            term = self._current_term
+
+            failed = self._read_wait(lambda: self._commit_index >= self._term_start_index, term, deadline)
+            if failed:
+                return failed
+            read_index = self._commit_index
+
+            self._read_round += 1
+            round_ = self._read_round
+            sends = self._prepare_appends(self._peers)
+        # Lock released: only now do the RPCs leave (the threading rule).
+        for peer, args in sends:
+            self._submit(self._send_append, peer, args)
+
+        with self._lock:
+            failed = self._read_wait(lambda: self._round_acks(round_) >= self._majority, term, deadline)
+            if failed:
+                return failed
+            failed = self._read_wait(lambda: self._last_applied >= read_index, None, deadline)
+            if failed:
+                return failed
+            return ReadIndex(ReadOutcome.OK, index=read_index, leader_hint=self.node_id)
+
+    def _round_acks(self, round_: int) -> int:
+        """Nodes, ourselves included, that answered an AppendEntries of
+        round `round_` or later, in the current term."""
+        return 1 + sum(1 for p in self._peers if self._acked_round.get(p, 0) >= round_)
+
+    def _read_wait(self, ready, term, deadline) -> Optional[ReadIndex]:
+        """Wait (lock held, released while waiting) until ready(). Returns
+        None when ready, or the failure to report. term=None: leadership
+        not required (step 5)."""
+        while not ready():
+            if self._stop.is_set():
+                return ReadIndex(ReadOutcome.STOPPED)
+            if term is not None and (self._role != Role.LEADER or self._current_term != term):
+                return ReadIndex(ReadOutcome.LEADERSHIP_LOST, leader_hint=self._leader_id)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ReadIndex(ReadOutcome.TIMEOUT)
+            self._read_wake.wait(remaining)
+        return None
 
     # --- the clock -----------------------------------------------------------
 
@@ -387,6 +501,7 @@ class RaftNode:
             # so it cannot keep any promise about them (R4).
             self._fail_pending(Outcome.LEADERSHIP_LOST)
         if (term, role) != (old_term, old_role):
+            self._read_wake.notify_all()  # a waiting read_index() must re-check
             self._emit(RoleChange(self.node_id, old_term, term, old_role, role, self._voted_for, reason))
 
     def _step_down_if_stale(self, term: int, source: str) -> bool:
@@ -442,6 +557,10 @@ class RaftNode:
         last_index = self._storage.last_index()
         self._next_index = {peer: last_index + 1 for peer in self._peers}
         self._match_index = {peer: 0 for peer in self._peers}
+        # Acks count only within one term: an answer to an earlier term's
+        # leadership proves nothing about this one.
+        self._sent_round = {peer: 0 for peer in self._peers}
+        self._acked_round = {peer: 0 for peer in self._peers}
         self._next_heartbeat = 0.0
         # Section 8: "each leader commit a blank no-op entry into the log at
         # the start of its term". Until an entry of ITS term is committed, a
@@ -451,6 +570,8 @@ class RaftNode:
         # is set, so the first AppendEntries to each peer carries it.
         # (docs/decisions.md, R9)
         self._storage.append([LogEntry(self._current_term, b"", EntryKind.NOOP)])
+        # read_index() waits until this index is committed (precaution one).
+        self._term_start_index = self._storage.last_index()
         log.info(
             "[%s] term %d: appended no-op at index %d",
             self.node_id, self._current_term, self._storage.last_index(),
@@ -464,6 +585,9 @@ class RaftNode:
             if peer in self._ae_in_flight:
                 continue  # its reply will trigger the next send (_on_append_reply)
             self._ae_in_flight.add(peer)
+            # One AE in flight per peer (R7), so one slot per peer is enough
+            # to remember which read round this one belongs to.
+            self._sent_round[peer] = self._read_round
             out.append((peer, self._append_args_for(peer)))
         return out
 
@@ -512,6 +636,7 @@ class RaftNode:
             log.info("[%s] term %d: commitIndex %d -> %d", self.node_id, self._current_term, self._commit_index, n)
             self._commit_index = n
             self._applier_wake.notify()
+            self._read_wake.notify_all()
 
     def _fail_pending(self, outcome: Outcome):
         for proposal in self._pending.values():
@@ -721,22 +846,33 @@ class RaftNode:
         with self._lock:
             # Only a reply from THIS term clears the flag: a straggler from an
             # earlier leadership must not clear the flag of a newer RPC.
+            sent_round = 0
             if args.term == self._current_term:
                 self._ae_in_flight.discard(peer)
+                sent_round = self._sent_round.get(peer, 0)  # this RPC's round
             if reply is None:
                 return  # the next heartbeat tick retries
-            follow_up = self._on_append_reply(peer, args, reply)
+            follow_up = self._on_append_reply(peer, args, reply, sent_round)
         for p, a in follow_up:
             self._submit(self._send_append, p, a)
 
-    def _on_append_reply(self, peer: str, args: AppendEntriesArgs, reply: AppendEntriesReply) -> list:
+    def _on_append_reply(
+        self, peer: str, args: AppendEntriesArgs, reply: AppendEntriesReply, sent_round: int = 0
+    ) -> list:
         """The leader's half of 5.3. Returns the next RPC for this peer, if
-        it is still behind."""
+        it is still behind (or owes an answer to a newer read round)."""
         # All Servers rule, on the reply path too.
         if self._step_down_if_stale(reply.term, f"AppendEntries reply from {peer}"):
             return []
         if self._role != Role.LEADER or self._current_term != args.term:
             return []  # we were deposed (or re-elected) while it was in flight
+
+        # Read-index (precaution two). Any reply in our term counts, success
+        # or a consistency-check refusal: either way the peer still had our
+        # term when it answered, which is all a read needs to know.
+        if sent_round > self._acked_round[peer]:
+            self._acked_round[peer] = sent_round
+            self._read_wake.notify_all()
 
         if reply.entry_appended:
             # Figure 2, Leaders: "If successful: update nextIndex and
@@ -764,6 +900,10 @@ class RaftNode:
         # "...and retry": keep going while the peer is behind, without
         # waiting for the next heartbeat.
         if self._next_index[peer] <= self._storage.last_index():
+            return self._prepare_appends([peer])
+        # A read started while this RPC was in flight and needs an answer
+        # to an RPC built after it: send one now, not at the next tick.
+        if self._acked_round[peer] < self._read_round:
             return self._prepare_appends([peer])
         return []
 
@@ -808,6 +948,7 @@ class RaftNode:
                 with self._lock:
                     self._last_applied = index
                     self._resolve_applied(index, entry.term, result)
+                    self._read_wake.notify_all()
                 if self._stop.is_set():
                     return
 
