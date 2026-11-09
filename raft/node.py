@@ -1,5 +1,8 @@
-"""The Raft node core: leader election only (Raft paper, Ongaro & Ousterhout,
-Figure 2 and section 5.2). No log, no replication, no persistence.
+"""The Raft node core (Raft paper, Ongaro & Ousterhout, Figure 2): leader
+election (section 5.2), the election restriction (5.4.1), and the FOLLOWER
+side of log replication (5.3): the full AppendEntries receiver. The leader
+still only sends heartbeats. Persistent state goes through raft/storage.py;
+it is in memory only until step 6.
 
 Why this file looks the way it does -- the invariants first
 -----------------------------------------------------------
@@ -11,13 +14,21 @@ two facts this file enforces:
       same cluster overlap in at least one node.
 So two different candidates cannot both collect a majority in one term.
 
+Log Matching (Figure 3): if two logs hold an entry with the same index and
+term, the logs are identical up to that index. Holds because
+  (a) a leader creates at most one entry per index in its term and never
+      moves or deletes it (propose() only appends), and
+  (b) a follower accepts entries only if it already holds the entry just
+      before them (AppendEntries receiver step 2) -- an induction on length.
+
 Liveness (a leader eventually emerges) comes from randomised election
 timeouts: two nodes rarely time out together, so one usually wins before
 anyone else starts.
 
 Threading model
 ---------------
-  * ONE lock (self._lock) guards all mutable node state.
+  * ONE lock (self._lock) guards all mutable node state, including the
+    storage object.
   * The lock is NEVER held across an outgoing RPC. Handlers and reply
     processing take it briefly, decide, mutate, release. Outgoing RPCs are
     prepared under the lock as plain argument objects, then sent after it is
@@ -46,11 +57,13 @@ from typing import Callable, Optional, Sequence
 from raft.messages import (
     AppendEntriesArgs,
     AppendEntriesReply,
+    LogEntry,
     RequestVoteArgs,
     RequestVoteReply,
     Transport,
     TransportError,
 )
+from raft.storage import MemoryStorage
 
 log = logging.getLogger("raft.node")
 
@@ -106,11 +119,10 @@ class NodeStatus:
     role: Role
     voted_for: Optional[str]
     leader_id: Optional[str]
-
-
-def _empty_log() -> tuple:
-    """(lastLogIndex, lastLogTerm) of a log that does not exist yet."""
-    return (0, 0)
+    last_log_index: int = 0
+    last_log_term: int = 0
+    commit_index: int = 0
+    last_applied: int = 0
 
 
 class RaftNode:
@@ -124,16 +136,16 @@ class RaftNode:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         rng: Optional[random.Random] = None,
         observer: Optional[Callable[[RoleChange], None]] = None,
-        last_log: Optional[Callable[[], tuple]] = None,
+        storage: Optional[MemoryStorage] = None,
     ):
         """
         observer: called with a RoleChange on every change of (term, role),
             WHILE the node lock is held, so events are delivered in exactly
             the order the changes happened. It must therefore be quick,
             must not block, and must not call back into this node.
-        last_log: returns (lastLogIndex, lastLogTerm). Defaults to (0, 0),
-            the empty log. Step 4 replaces it with the real log; the voting
-            rule below already uses it. Called under the lock.
+        storage: Figure 2's persistent state (currentTerm, votedFor, log[]).
+            Default: a fresh, empty MemoryStorage. Every read and write of
+            that state goes through it (raft/storage.py explains the seam).
         """
         lo, hi = election_timeout
         if not 0 < lo <= hi:
@@ -150,14 +162,16 @@ class RaftNode:
         self._heartbeat_interval = heartbeat_interval
         self._rng = rng or random.Random()
         self._observer = observer
-        self._last_log = last_log or _empty_log
 
-        # Figure 2, "State" -- persistent in the paper, in memory only here
-        # (step 6; see docs/raft-election.md, "Known gaps").
-        self._current_term = 0
-        self._voted_for: Optional[str] = None
+        # Figure 2, "Persistent state on all servers": currentTerm, votedFor,
+        # log[]. All three live in storage; see the properties below.
+        self._storage = storage if storage is not None else MemoryStorage()
 
-        # Volatile.
+        # Figure 2, "Volatile state on all servers".
+        self._commit_index = 0
+        self._last_applied = 0
+
+        # Volatile, not in Figure 2.
         self._role = Role.FOLLOWER
         self._leader_id: Optional[str] = None
         self._votes: set = set()  # who voted for us in the current candidacy
@@ -172,6 +186,26 @@ class RaftNode:
         self._stop = threading.Event()
         self._ticker: Optional[threading.Thread] = None
         self._pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+    # --- Figure 2 persistent state, read through storage ---------------------
+    # Read-only properties: `self._current_term = x` raises AttributeError,
+    # so no line in this file can change the term or vote without going
+    # through self._storage.set_term_and_vote (the persistence seam).
+
+    @property
+    def _current_term(self) -> int:
+        return self._storage.term
+
+    @property
+    def _voted_for(self) -> Optional[str]:
+        return self._storage.voted_for
+
+    def _last_log(self) -> tuple:
+        """(lastLogIndex, lastLogTerm). In the election chunk this was an
+        injected hook defaulting to (0, 0) (E12); now it reads the real log,
+        so the vote check below uses it with no other change."""
+        index = self._storage.last_index()
+        return (index, self._storage.term_at(index))
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -196,9 +230,16 @@ class RaftNode:
 
     def status(self) -> NodeStatus:
         with self._lock:
+            last_index, last_term = self._last_log()
             return NodeStatus(
-                self.node_id, self._current_term, self._role, self._voted_for, self._leader_id
+                self.node_id, self._current_term, self._role, self._voted_for, self._leader_id,
+                last_index, last_term, self._commit_index, self._last_applied,
             )
+
+    def log_entries(self) -> tuple:
+        """A copy of log[1..lastLogIndex], for tests and debugging."""
+        with self._lock:
+            return self._storage.entries_from(1, self._storage.last_index())
 
     # --- the clock -----------------------------------------------------------
 
@@ -247,8 +288,7 @@ class RaftNode:
         if term < old_term:
             raise AssertionError(f"term went backwards: {old_term} -> {term}")
         if term > old_term:
-            self._current_term = term
-            self._voted_for = vote
+            self._storage.set_term_and_vote(term, vote)
             self._votes = set()
         self._role = role
         if role != Role.LEADER:
@@ -322,6 +362,12 @@ class RaftNode:
             )
         return out
 
+    def _set_commit_index(self, n: int):
+        """commitIndex "increases monotonically" (Figure 2): never lowered."""
+        if n > self._commit_index:
+            log.info("[%s] term %d: commitIndex %d -> %d", self.node_id, self._current_term, self._commit_index, n)
+            self._commit_index = n
+
     def _emit(self, event: RoleChange):
         if self._observer is None:
             return
@@ -356,7 +402,7 @@ class RaftNode:
                 )
             else:
                 granted = True
-                self._voted_for = args.from_id
+                self._storage.set_term_and_vote(self._current_term, args.from_id)
                 # Followers: the timer is reset on "granting vote to candidate".
                 self._reset_election_timer()
                 why = "ok"
@@ -379,15 +425,12 @@ class RaftNode:
         return (args.last_log_term, args.last_log_index) >= (my_term, my_index)
 
     def handle_append_entries(self, args: AppendEntriesArgs) -> AppendEntriesReply:
-        """Figure 2, "AppendEntries RPC", receiver implementation -- the
-        heartbeat subset: steps 1 and 2 only (no entries to append, no
-        commitIndex to advance yet).
-        """
+        """Figure 2, "AppendEntries RPC", receiver implementation, steps 1-5."""
         with self._lock:
             self._step_down_if_stale(args.term, f"AppendEntries from {args.from_id}")
 
             if args.term < self._current_term:
-                # Receiver impl. 1: "Reply false if term < currentTerm".
+                # Step 1: "Reply false if term < currentTerm".
                 # A stale leader: do NOT reset the timer, do NOT adopt it.
                 return AppendEntriesReply(
                     self.node_id, args.from_id, self._current_term, False, 0
@@ -410,11 +453,75 @@ class RaftNode:
             # which the term check above has established.
             self._reset_election_timer()
 
-            # Receiver impl. 2: "Reply false if log doesn't contain an entry
-            # at prevLogIndex whose term matches prevLogTerm". Our log is
-            # empty, so the only entry that "exists" is the sentinel at 0.
-            ok = args.prev_index == 0 and args.prev_term == 0
-            return AppendEntriesReply(self.node_id, args.from_id, self._current_term, ok, 0)
+            # Step 2: "Reply false if log doesn't contain an entry at
+            # prevLogIndex whose term matches prevLogTerm". Index 0 is the
+            # sentinel (term 0) that every log has, so prevLogIndex = 0
+            # always passes.
+            if (
+                args.prev_index > self._storage.last_index()
+                or self._storage.term_at(args.prev_index) != args.prev_term
+            ):
+                log.debug(
+                    "[%s] refuse AppendEntries from %s: no entry (index %d, term %d)",
+                    self.node_id, args.from_id, args.prev_index, args.prev_term,
+                )
+                return AppendEntriesReply(
+                    self.node_id, args.from_id, self._current_term, False, 0
+                )
+
+            # Steps 3 and 4.
+            self._merge_entries(args.prev_index, args.entries)
+
+            # Our log now matches the leader's up to here -- and not
+            # necessarily beyond (we may hold stale entries after it).
+            last_new = args.prev_index + len(args.entries)
+
+            # Step 5: "If leaderCommit > commitIndex, set commitIndex =
+            # min(leaderCommit, index of last new entry)". For a delayed RPC
+            # the min can be BELOW our commitIndex; _set_commit_index never
+            # lowers it ("increases monotonically").
+            if args.commit_index > self._commit_index:
+                self._set_commit_index(min(args.commit_index, last_new))
+
+            return AppendEntriesReply(
+                self.node_id, args.from_id, self._current_term, True, last_new
+            )
+
+    def _merge_entries(self, prev_index: int, entries: Sequence[LogEntry]):
+        """Receiver steps 3 and 4:
+          3. "If an existing entry conflicts with a new one (same index but
+             different terms), delete the existing entry and all that follow it"
+          4. "Append any new entries not already in the log"
+
+        Walk the new entries alongside our log. An entry we already hold
+        with the same term is skipped: same index and same term means the
+        same entry (Log Matching), so there is nothing to do -- and nothing
+        after it is deleted. Only a real conflict truncates. That is what
+        makes a duplicated or delayed AppendEntries harmless (5.5: the
+        follower "ignores those entries in the new request").
+        """
+        for offset, entry in enumerate(entries):
+            index = prev_index + 1 + offset
+            if index <= self._storage.last_index():
+                if self._storage.term_at(index) == entry.term:
+                    continue  # already have it
+                # Step 3: a real conflict.
+                assert index > self._commit_index, (
+                    f"[{self.node_id}] would delete committed entry {index}"
+                    f" (commitIndex {self._commit_index}): State Machine Safety broken"
+                )
+                log.info(
+                    "[%s] conflict at index %d (have term %d, leader has %d): deleting %d..%d",
+                    self.node_id, index, self._storage.term_at(index), entry.term,
+                    index, self._storage.last_index(),
+                )
+                self._storage.truncate_from(index)
+            # Step 4: everything from this entry on is new to us.
+            self._storage.append(entries[offset:])
+            log.info(
+                "[%s] appended %d..%d from leader", self.node_id, index, prev_index + len(entries)
+            )
+            return
 
     # --- outgoing RPCs (worker threads; the node lock is NOT held) -----------
 

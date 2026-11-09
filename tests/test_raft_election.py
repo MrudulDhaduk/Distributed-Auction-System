@@ -29,12 +29,14 @@ import pytest
 from raft.messages import (
     AppendEntriesArgs,
     AppendEntriesReply,
+    LogEntry,
     RequestVoteArgs,
     RequestVoteReply,
     Transport,
     TransportError,
 )
 from raft.node import RaftNode, Role
+from raft.storage import MemoryStorage
 from raft.transport import InMemoryTransport
 
 FAST = dict(election_timeout=(0.15, 0.30), heartbeat_interval=0.03)
@@ -57,7 +59,7 @@ class Cluster:
     """N started-on-demand nodes on one InMemoryTransport, with an observer
     recording every role/term change and every leader per term."""
 
-    def __init__(self, n=3, seed=0, last_logs=None, **config):
+    def __init__(self, n=3, seed=0, **config):
         self.net = InMemoryTransport()
         self.ids = [f"n{i}" for i in range(1, n + 1)]
         self.events = []
@@ -71,7 +73,6 @@ class Cluster:
                 self.net,
                 rng=random.Random(seed * 1000 + i),
                 observer=self._observe,
-                last_log=(last_logs or {}).get(nid),
                 **{**FAST, **config},
             )
             self.nodes[nid] = node
@@ -451,6 +452,12 @@ def test_a_minority_partition_cannot_elect_a_leader(cluster):
 # --- Figure 2 + 5.4.1: "candidate's log is at least as up-to-date" ---------
 
 
+def voter_with_log():
+    """A voter whose real log ends at (index 3, term 2)."""
+    log_ = [LogEntry(1, b"a"), LogEntry(2, b"b"), LogEntry(2, b"c")]
+    return make_node("n1", storage=MemoryStorage(term=2, entries=log_))
+
+
 @pytest.mark.parametrize(
     "cand_last_term, cand_last_index, granted",
     [
@@ -464,7 +471,7 @@ def test_a_minority_partition_cannot_elect_a_leader(cluster):
 def test_vote_requires_candidate_log_at_least_as_up_to_date(
     cand_last_term, cand_last_index, granted
 ):
-    voter = make_node("n1", last_log=lambda: (3, 2))  # (index, term)
+    voter = voter_with_log()
 
     reply = voter.handle_request_vote(
         rv(from_id="n2", term=7, last_log_index=cand_last_index, last_log_term=cand_last_term)
@@ -478,7 +485,7 @@ def test_vote_requires_candidate_log_at_least_as_up_to_date(
 
 
 def test_refused_stale_candidate_does_not_burn_the_vote():
-    voter = make_node("n1", last_log=lambda: (3, 2))
+    voter = voter_with_log()
     assert not voter.handle_request_vote(rv("n2", term=7, last_log_index=1, last_log_term=1)).vote_granted
     # Same term, an up-to-date candidate can still get the vote.
     assert voter.handle_request_vote(rv("n3", term=7, last_log_index=3, last_log_term=2)).vote_granted
