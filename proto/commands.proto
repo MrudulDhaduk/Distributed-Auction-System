@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package commands;
+
+// The bytes inside a Raft log entry (raft/messages.py LogEntry.data).
+//
+// Raft never looks inside these bytes (docs/decisions.md, R1). The leader
+// encodes a command ONCE (replication/codec.py), the bytes are replicated
+// and stored in every node's log.bin, and every node decodes those same
+// bytes in apply_fn. So every node sees exactly the same command.
+//
+// FIELD NUMBERS ARE PERMANENT. These bytes live in log.bin forever and are
+// decoded again on every restart (the log is replayed, P11). Changing what
+// a field number means would make an old log decode into a different
+// command, which would make a restarted node build a different state from
+// the other nodes. Rules:
+//   * never reuse or renumber a field;
+//   * if a field or a command is ever removed, add its number (and name)
+//     to a `reserved` line in the same message, so nobody can reuse it.
+//
+// All times are int64 epoch microseconds, UTC, the same as auction.proto,
+// converted only by common/time_conv.py.
+
+message Command {
+  // Client-request dedupe (Raft paper section 8: "clients assign unique
+  // serial numbers to every command"). client_id = "" means "no dedupe":
+  // used by the closer, which is the cluster itself, not a client.
+  string client_id = 1;
+  uint64 seq = 2;
+
+  // Exactly one is set. Not set at all = a corrupt or foreign entry, and
+  // decoding fails (replication/codec.py raises DecodeError).
+  oneof kind {
+    CreateAuction create_auction = 10;
+    PlaceBid place_bid = 11;
+    CloseAuction close_auction = 12;
+    Login login = 13;
+    Logout logout = 14;
+  }
+}
+
+// 1:1 with auction/state.py's CreateAuction.
+message CreateAuction {
+  int64 auction_id = 1;
+  string item = 2;
+  int64 close_time = 3;
+  string owner = 4;
+  string description = 5;   // LLM text, generated BEFORE proposing
+}
+
+// 1:1 with auction/state.py's PlaceBid.
+message PlaceBid {
+  int64 auction_id = 1;
+  string bidder = 2;
+  int64 amount = 3;
+  int64 curr_time = 4;      // the leader's clock, stamped once
+}
+
+// 1:1 with auction/state.py's CloseAuction.
+message CloseAuction {
+  int64 auction_id = 1;
+  int64 curr_time = 2;      // the leader's clock, stamped once
+}
+
+// 1:1 with sessions/state.py's Login. The token is generated on the leader
+// with secrets.token_urlsafe BEFORE proposing and carried here as data.
+message Login {
+  string token = 1;
+  string username = 2;
+}
+
+// 1:1 with sessions/state.py's Logout.
+message Logout {
+  string token = 1;
+}
