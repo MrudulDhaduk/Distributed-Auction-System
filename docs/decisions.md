@@ -2039,11 +2039,36 @@ end of that file.
                 covers. An older state, correctly labelled, is never a wrong
                 one.
 
-### T17. Bug found, not fixed: a transient Windows PermissionError on `os.replace` fail-stops FileStorage
-- Chose:        Pin it with a strict xfail
-                (`tests/test_storage_transient_replace.py`) and a test of
-                today's behaviour. Report it. Do not change `raft/` in this
-                chunk.
+### T17. FileStorage retries a transient Windows PermissionError on `os.replace` before fail-stopping
+- Chose:        `set_term_and_vote` calls `_replace_with_retry`: on
+                `PermissionError`, retry `os.replace` up to `REPLACE_RETRIES`
+                (10) times, sleeping 10 ms doubling, at most `REPLACE_BUDGET`
+                (0.5 s) in total, so a persistent refusal is given up after 7
+                attempts (10+20+40+80+160 ms, then the remaining 190 ms). Each
+                retry is logged at WARNING. Only after that does it fail-stop
+                (P10). Any other error still fail-stops at once. First pinned
+                as a strict xfail; the change to `raft/file_storage.py` was
+                then explicitly allowed and made in its own commit.
+- Alternatives: leave it (one node permanently out after one sharing
+                violation); retry forever (a really stuck file would freeze
+                the node under its lock with no error); retry every write
+                (log appends go through an open handle, no replace, and were
+                never refused); catch everything (an ENOSPC is not transient).
+- Why a retry is safe: a failed `os.replace` changes nothing. It is atomic,
+                so the old `state.json` is still the whole valid file. The new
+                bytes sit fsync'd in `state.json.tmp`, which open() ignores
+                (P3). The in-memory copy (`self._mem`) is updated only after
+                the replace succeeds, so nobody has seen the new term or vote,
+                and no reply could have been sent on it. Retrying is the first
+                attempt over again.
+- Cost:         the sleeps happen under the node lock, so for at most 0.5 s
+                the node answers nothing. Peers see a slow node, which Raft
+                tolerates. Replying on an undurable vote would not be (P8).
+- Tests:        `tests/test_storage_transient_replace.py`: one refusal then
+                success (was the xfail); three refusals then success with three
+                WARNINGs; a persistent refusal still fail-stops with disk and
+                memory unchanged; the sleeps are 10 ms doubling within the
+                budget; a non-PermissionError is not retried.
 - What:         failover stress, 0.15-0.3 s config, n3.log 22:49:26:
                 `os.replace(tmp, state.json)` raised `PermissionError [WinError
                 5] Access is denied` during a step-down. P10 then refuses all
@@ -2056,15 +2081,17 @@ end of that file.
                 it was not logged.
 - Safety:       intact. The write raised, so the node never acted on an
                 undurable term or vote (P8, P10). Only availability is lost.
-- Fix (later):  retry `os.replace` a few times on `PermissionError` (Windows),
-                and fail-stop only if it persists. The xfail states that.
+- Paper:        Figure 2 ("Updated on stable storage before responding to
+                RPCs"): the retry happens before the response, so the rule
+                holds.
 - Viva Q:       "Your storage gave up on a healthy disk. Isn't fail-stop
                 wrong?"
 - Answer:       Fail-stop is right for a real write failure: carrying on
-                could ack an undurable vote. What's wrong is classifying a
-                transient Windows sharing violation as a real failure. That
-                needs a bounded retry first. It's pinned by a strict xfail
-                and not fixed here, because this chunk doesn't change raft/.
+                could ack an undurable vote. What was wrong was treating a
+                transient Windows sharing violation as a real failure. Now it
+                gets a bounded retry first, which is safe because a failed
+                replace changed nothing. If it persists past half a second,
+                it fail-stops exactly as before.
 
 ### T18. Client-observed failover (~2.2 s) is Windows' connect-refused delay, reported, not tuned
 - Finding:      `t_write` was ~2.2 s in every config, whether the election

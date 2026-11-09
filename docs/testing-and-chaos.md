@@ -413,14 +413,14 @@ replicas agreed. The post-close bid was refused. All eight properties pass.
 7. **Status reads aren't atomic across Raft and the state machine** (§1
    caveat). That's fine for the dashboard. The checker relies only on quiet-time
    dumps.
-8. **BUG, pinned not fixed (T17): FileStorage dies on a transient Windows
-   `PermissionError`.** Seen in the failover stress run at 0.15-0.3 s
+8. **Bug found by stress, now fixed (T17): FileStorage died on a transient
+   Windows `PermissionError`.** Seen in the failover stress run at 0.15-0.3 s
    timeouts: `os.replace(tmp, state.json)` was refused once ("Access is
    denied"), P10 fail-stopped the storage, and the node could never change
-   term again. Strict xfail: `tests/test_storage_transient_replace.py`. If it
-   hits today: one node is permanently out until restarted. Safety holds
-   (the failed write raised before anything was acted on). It's never been
-   seen at the default 0.5-1.0 s timeouts, where term changes are rare.
+   term again. `set_term_and_vote` now retries the replace (10 ms doubling,
+   ≤ 0.5 s), logging a WARNING each time, and fail-stops only if the refusal
+   persists. Remaining gap: a lock held longer than 0.5 s still takes the
+   node out, by design. Tests: `tests/test_storage_transient_replace.py`.
 9. **Three harness bugs found by the stress runs, all fixed** (T14, T16):
    waiting for identical digests before each kill (never happens under
    writes); counting the old leader's last ack as "first write after

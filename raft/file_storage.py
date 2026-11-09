@@ -83,6 +83,7 @@ import json
 import logging
 import os
 import struct
+import time
 import zlib
 from typing import Optional, Sequence
 
@@ -94,6 +95,12 @@ log = logging.getLogger("raft.storage")
 STATE_FILE = "state.json"
 STATE_TMP = STATE_FILE + ".tmp"
 LOG_FILE = "log.bin"
+
+# os.replace retry on PermissionError (set_term_and_vote; decisions.md T17):
+# 10 ms, 20, 40, 80, 160, then whatever is left of the 0.5 s budget.
+REPLACE_RETRIES = 10
+REPLACE_FIRST_DELAY = 0.010
+REPLACE_BUDGET = 0.5
 
 HEADER = struct.Struct(">III")  # payload length, crc32(length bytes), crc32(payload)
 PAYLOAD_HEAD = struct.Struct(">QB")  # term, kind
@@ -290,6 +297,26 @@ class FileStorage:
     # --- writes: durable before they return ----------------------------------
 
     def set_term_and_vote(self, term: int, voted_for: Optional[str]) -> None:
+        """Write term + vote durably (tmp file, fsync, os.replace), THEN
+        update the in-memory copy.
+
+        os.replace is retried on PermissionError (_replace_with_retry,
+        docs/decisions.md T17). On Windows it is refused while another
+        process holds state.json open for a moment (antivirus, the search
+        indexer), and a moment later the same call succeeds. Before this,
+        one such refusal fail-stopped the storage for good.
+
+        Why a retry is safe: a failed os.replace changes nothing. The old
+        state.json is still the whole, valid file: replace is atomic, so it
+        either swapped in the new file or did nothing. The new bytes sit
+        fsync'd in state.json.tmp, which open() ignores (P3). And
+        self._mem is only updated AFTER the replace succeeds, so no reader
+        (and no RPC reply) has seen the new term or vote. Nothing durable
+        and nothing visible has changed, so trying the same replace again
+        is exactly the first attempt over again.
+
+        Only when the retries are used up does it fail-stop as before (P10).
+        Any other error fail-stops at once."""
         self._check_writable()
         body = json.dumps({"term": term, "voted_for": voted_for}).encode("utf-8")
         tmp = os.path.join(self.path, STATE_TMP)
@@ -298,12 +325,40 @@ class FileStorage:
                 fh.write(body)
                 fh.flush()  # Python's buffer -> the OS
                 os.fsync(fh.fileno())  # the OS -> the device
-            os.replace(tmp, os.path.join(self.path, STATE_FILE))
+            self._replace_with_retry(tmp, os.path.join(self.path, STATE_FILE))
             _fsync_dir(self.path)
         except BaseException as e:
             self._fail(e)
             raise
         self._mem.set_term_and_vote(term, voted_for)
+
+    def _replace_with_retry(self, src: str, dst: str) -> None:
+        """os.replace(src, dst), retried on PermissionError up to
+        REPLACE_RETRIES times: sleep 10 ms, doubling, never more than
+        REPLACE_BUDGET seconds in total. Each retry is logged at WARNING.
+        The last PermissionError is raised if every attempt is refused.
+
+        The sleeps happen under the node lock (set_term_and_vote is called
+        from inside it), so for at most REPLACE_BUDGET the node answers
+        nothing. Peers see a slow node, which Raft tolerates. Replying
+        before the vote is durable would not be tolerated (P8)."""
+        delay, slept = REPLACE_FIRST_DELAY, 0.0
+        for retry in range(1, REPLACE_RETRIES + 1):
+            try:
+                os.replace(src, dst)
+                return
+            except PermissionError as e:
+                pause = min(delay, REPLACE_BUDGET - slept)
+                if pause <= 0:
+                    raise
+                log.warning(
+                    "%s: os.replace refused (%r); retry %d/%d in %.0f ms",
+                    self.path, e, retry, REPLACE_RETRIES, pause * 1000,
+                )
+                time.sleep(pause)
+                slept += pause
+                delay *= 2
+        os.replace(src, dst)  # the last attempt: a PermissionError here propagates
 
     def append(self, entries: Sequence[LogEntry]) -> None:
         self._check_writable()

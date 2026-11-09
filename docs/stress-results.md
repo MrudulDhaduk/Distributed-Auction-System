@@ -158,8 +158,8 @@ testing-and-chaos.md Known gaps.
 ### Bugs this measurement found (all logged)
 
 - Status RPC throttling the node it observed: fixed (T16).
-- FileStorage fail-stopping on a transient Windows `PermissionError`: pinned as
-  a strict xfail, not fixed in this chunk (T17).
+- FileStorage fail-stopping on a transient Windows `PermissionError`: fixed
+  (T17), after being pinned as a strict xfail.
 - Three harness bugs: waiting for identical digests under load, counting the
   old leader's last ack, a writer outliving its cluster (T14).
 - Windows' 2 s connect-refused delay dominating client failover: explained,
