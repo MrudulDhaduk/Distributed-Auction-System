@@ -78,6 +78,12 @@ class StateMachine:
         # client_id -> (seq, Applied): the latest serial number per client
         # and its response.
         self._dedupe: dict = {}
+        # The index of the last command apply_fn was called with. Not
+        # replicated state and not in snapshot(): it only labels WHICH state
+        # indexed_snapshot() returns, for the status RPC (docs/decisions.md,
+        # T4). No-op entries never reach apply_fn, so it can be below the
+        # node's lastApplied.
+        self._last_index = 0
         # Held for the whole of apply_fn. Under Raft only the applier thread
         # calls apply_fn, so this never contends; it matters for
         # LocalReplicator (single-node tests), where handler threads call
@@ -101,6 +107,7 @@ class StateMachine:
             raise CorruptEntryError(f"index {index}: {e}") from e
 
         with self._lock:
+            self._last_index = index
             if env.client_id:
                 last = self._dedupe.get(env.client_id)
                 if last is not None:
@@ -149,10 +156,15 @@ class StateMachine:
 
     def snapshot(self) -> dict:
         """A deep copy of all replicated state, for comparing nodes."""
+        return self.indexed_snapshot()[1]
+
+    def indexed_snapshot(self) -> tuple:
+        """(index, snapshot), taken together under self._lock, so the index
+        is exactly the last command folded into that snapshot."""
         with self._lock:
             with self.auctions.lock:
                 auctions = copy.deepcopy(self.auctions.auctions)
-            return {
+            return self._last_index, {
                 "auctions": auctions,
                 "sessions": self.sessions.snapshot(),
                 "dedupe": dict(self._dedupe),
