@@ -247,3 +247,46 @@ def call(node, service, method, request, token=None):
     details = HandlerCallDetails(f"/auction.{service}/{method}", metadata)
     wrapped = node.interceptor.intercept_service(lambda _: handler, details)
     return wrapped.unary_unary(request, FakeContext(metadata))
+
+
+# --- the client's view: an "invoker" over the in-memory cluster ------------------
+
+
+class FakeRpcError(grpc.RpcError):
+    """What a real grpc.RpcError offers the client: code, details,
+    trailing metadata."""
+
+    def __init__(self, code, details="", trailing=()):
+        super().__init__(f"{code.name}: {details}")
+        self._code, self._details, self._trailing = code, details, tuple(trailing)
+
+    def code(self):
+        return self._code
+
+    def details(self):
+        return self._details
+
+    def trailing_metadata(self):
+        return self._trailing
+
+
+def in_memory_invoker(cluster):
+    """invoker(addr, service, method, request, metadata, timeout) for
+    client/auction_client.ClusterClient. A crashed node's address answers
+    UNAVAILABLE, like a refused connection."""
+    by_addr = {addr: nid for nid, addr in CLIENT_ADDRS.items()}
+    calls = []
+
+    def invoke(addr, service, method, request, metadata, timeout):
+        calls.append((addr, method))
+        node = cluster.nodes.get(by_addr.get(addr))
+        if node is None:
+            raise FakeRpcError(grpc.StatusCode.UNAVAILABLE, "connection refused")
+        token = dict(metadata).get(TOKEN_METADATA_KEY)
+        try:
+            return call(node, service, method, request, token=token)
+        except RpcAbort as e:
+            raise FakeRpcError(e.code, e.details, tuple(e.trailing.items())) from None
+
+    invoke.calls = calls
+    return invoke
