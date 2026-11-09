@@ -2,10 +2,13 @@
 small interface.
 
 Figure 2 says this state is "Updated on stable storage before responding to
-RPCs". This chunk keeps it in memory only. The point of this module is
-the SEAM: the node changes these three things only through the three write
-methods below, so step 6 can make them durable (write + fsync inside these
-methods, before they return) without touching the algorithm in node.py.
+RPCs". The point of this module is the SEAM: the node changes these three
+things only through the three write methods of `Storage`, so making them
+durable is the storage's job, not the algorithm's. Two implementations:
+  MemoryStorage (here)           in memory only: unit tests, and the default
+  FileStorage (file_storage.py)  each write is fsync'd before it returns
+                                 (build order step 6)
+node.py did not change when FileStorage arrived.
 
 The node reads through this object too (it holds no copy of its own), so a
 write that bypassed the seam is impossible rather than merely discouraged.
@@ -18,11 +21,28 @@ succeeds and needs no special case.
 Not thread-safe by itself: every call happens under the node's lock.
 """
 
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Optional, Protocol, Sequence
 
 from raft.messages import LogEntry
 
 _SENTINEL = LogEntry(0, b"")
+
+
+class Storage(Protocol):
+    """What the node needs. Reads: `term`, `voted_for`, `last_index()`,
+    `term_at(i)`, `entry(i)`, `entries_from(i, limit)`. Writes -- the only
+    way to change currentTerm, votedFor and log[]:"""
+
+    term: int
+    voted_for: Optional[str]
+
+    def last_index(self) -> int: ...
+    def term_at(self, index: int) -> int: ...
+    def entry(self, index: int) -> LogEntry: ...
+    def entries_from(self, index: int, limit: int) -> tuple: ...
+    def set_term_and_vote(self, term: int, voted_for: Optional[str]) -> None: ...
+    def append(self, entries: Sequence[LogEntry]) -> None: ...
+    def truncate_from(self, index: int) -> None: ...
 
 
 class MemoryStorage:
@@ -65,7 +85,7 @@ class MemoryStorage:
         return tuple(self._log[index : index + limit])
 
     # --- writes: the persistence seam ------------------------------------
-    # Step 6 makes each of these durable before it returns.
+    # FileStorage makes each of these durable before it returns.
 
     def set_term_and_vote(self, term: int, voted_for: Optional[str]) -> None:
         """Written together because votedFor only means something together

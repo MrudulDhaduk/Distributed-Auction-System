@@ -2,7 +2,8 @@
 election (section 5.2), log replication and repair (5.3), the election
 restriction and the commit rule (5.4), and the leader's no-op entry at the
 start of its term (section 8). Persistent state goes through
-raft/storage.py; it is in memory only until step 6.
+raft/storage.py: in memory (MemoryStorage) or on disk, fsync'd before each
+write returns (FileStorage, raft/file_storage.py).
 
 Why this file looks the way it does -- the invariants first
 -----------------------------------------------------------
@@ -80,7 +81,7 @@ from raft.messages import (
     TransportError,
 )
 from raft.proposal import Outcome, Proposal
-from raft.storage import MemoryStorage
+from raft.storage import MemoryStorage, Storage
 
 log = logging.getLogger("raft.node")
 
@@ -157,7 +158,7 @@ class RaftNode:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         rng: Optional[random.Random] = None,
         observer: Optional[Callable[[RoleChange], None]] = None,
-        storage: Optional[MemoryStorage] = None,
+        storage: Optional[Storage] = None,
         apply_fn: Optional[Callable[[int, bytes], Any]] = None,
     ):
         """
