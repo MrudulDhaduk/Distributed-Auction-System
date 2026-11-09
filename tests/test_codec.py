@@ -40,6 +40,20 @@ def test_every_command_round_trips(command):
     assert env == codec.Envelope(command=command, client_id="c1", seq=42)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="M1 bug, common/time_conv.py:25: int(dt.timestamp() * 1e6) truncates a float. "
+    "2039-12-20 05:40:54.254810 -> 2207972454254809.8 -> ...809: 1 microsecond lost. "
+    "Not fixed here: CLAUDE.md asks to point at M1 bugs, not fix them silently. "
+    "Determinism is NOT affected (every node, the leader too, applies the decoded bytes).",
+)
+def test_round_trip_is_exact_to_the_microsecond_found_m1_bug():
+    t = datetime.datetime(2039, 12, 20, 5, 40, 54, 254810, tzinfo=UTC)
+    command = PlaceBid(auction_id=1, bidder="a", amount=1, curr_time=t)
+
+    assert codec.decode(codec.encode(command)).command == command
+
+
 def test_no_client_means_empty_client_id_and_seq_zero():
     env = codec.decode(codec.encode(CloseAuction(auction_id=1, curr_time=T)))
 
