@@ -35,6 +35,20 @@ package auction;
 //      `Result(success, reason)`). gRPC status codes are reserved for
 //      calls that could not be processed at all: UNAUTHENTICATED (bad
 //      token), INVALID_ARGUMENT (malformed message), INTERNAL (bug).
+//
+//   3. M2 (Raft): every node serves this API on its CLIENT port, but only
+//      the leader executes. Two more status codes, both "not processed":
+//        FAILED_PRECONDITION  this node is not the leader. Trailing
+//                             metadata "leader-id" / "leader-addr" names
+//                             the leader's client address, if known.
+//                             Nothing happened; retry there.
+//        UNAVAILABLE          the outcome is UNKNOWN (leadership lost, or
+//                             the commit timed out). Retry, on any node,
+//                             with the SAME (client_id, seq).
+//      Every write request carries (client_id, seq): the Raft paper's
+//      section 8 serial numbers. The state machine remembers the latest
+//      seq per client_id and answers a repeat with the stored response,
+//      so a retry is never executed twice. client_id "" = no dedupe.
 
 
 // --- Shared outcome type -----------------------------------------------
@@ -65,6 +79,10 @@ service AuthService {
 message LoginRequest {
   string username = 1;
   string password = 2;
+  // Section 8 serial number (design note 3). A retried Login returns the
+  // token minted by the FIRST attempt.
+  string client_id = 3;
+  uint64 seq = 4;
 }
 
 message LoginResponse {
@@ -74,9 +92,13 @@ message LoginResponse {
   string token = 2;
 }
 
-// Empty today. A named message (rather than google.protobuf.Empty) so a
-// field can be added later without changing the method signature.
-message LogoutRequest {}
+// A named message (rather than google.protobuf.Empty) so a field could be
+// added later without changing the method signature -- which M2 did.
+message LogoutRequest {
+  // Section 8 serial number (design note 3).
+  string client_id = 1;
+  uint64 seq = 2;
+}
 
 message LogoutResponse {
   // Idempotent: logging out an already-invalid token still reports
@@ -132,6 +154,9 @@ message CreateAuctionRequest {
   // GenerateItemDescription with an empty list, which llm_servicer.py
   // always rejects as INVALID_ARGUMENT.
   map<string, string> attributes = 5;
+  // Section 8 serial number (design note 3).
+  string client_id = 6;
+  uint64 seq = 7;
 }
 
 message CreateAuctionResponse {
@@ -153,6 +178,10 @@ message PlaceBidRequest {
   // be trusted (clock skew, or backdating a bid past the close time), and
   // the command never crosses the network as this message anyway (in M2
   // it is replicated as a Raft log entry, a different message).
+
+  // Section 8 serial number (design note 3).
+  string client_id = 3;
+  uint64 seq = 4;
 }
 
 message PlaceBidResponse {
