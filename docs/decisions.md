@@ -1522,3 +1522,143 @@ each part of that file.
 - Answer:       Not an auction node. Use `raft.run_node` for an in-memory Raft
                 demo. Anything that tells a client "your bid is placed" has to
                 survive a restart.
+
+### A14. Read-index inside `raft/node.py`: one round counter, one slot per peer, any same-term reply counts
+- Chose:        `read_index(timeout)`: wait for this term's no-op to commit,
+                record commitIndex, bump `_read_round` and send
+                AppendEntries, wait for a majority of `_acked_round >= round`,
+                wait for `lastApplied >= readIndex`. `_sent_round[peer]` is
+                set when an AppendEntries is built. `_acked_round[peer]` is
+                raised by any reply in the same term, success or refusal. A
+                peer whose in-flight RPC predates the round gets a follow-up
+                right away. Acks reset at the start of each term.
+- Alternatives: put the read through the log as a no-op command; a leader
+                lease (no round trip, relies on bounded clock drift); a
+                separate "ping" RPC; a list of pending reads with their own
+                sets of ackers.
+- Why:          A log write per read costs an fsync on every node and grows
+                the log. §8 rules out the lease for us: it "would rely on
+                timing for safety". A separate RPC would be a third Raft
+                message that is not in Figure 2. Reusing AppendEntries
+                keeps one message type and its existing term checks. One
+                counter plus one slot per peer is enough *because* there is at
+                most one AppendEntries in flight per peer (R7). Any reply in
+                our term proves "the peer had not moved past our term when it
+                answered", and that is the only fact the safety argument
+                needs.
+- Paper:        §8 (two precautions); thesis §6.4 (ReadIndex ordering).
+- Viva Q:       "Why is a majority of heartbeat replies enough to rule out a
+                newer leader?"
+- Answer:       A newer leader needs votes from a majority in a higher term.
+                Our acking majority shares at least one node with that one.
+                That node answered us in our term after the read began, and
+                terms never go back down, so it hadn't voted in a higher term
+                yet. No newer leader existed when the read began.
+
+### A15. Reads are served by the leader only
+- Chose:        `GetAuction` / `ListAuctions` call `read_barrier()`. A
+                follower answers NOT_LEADER like a write.
+- Alternatives: follower reads (fast, possibly stale); follower read-index
+                (the follower asks the leader for the index and waits until
+                it has applied that far); serve reads from any node and
+                document them as "eventually consistent".
+- Why:          A bidder deciding what to bid needs the real high bid. A
+                stale read that shows a lower high bid makes the next bid
+                fail and looks like a bug. Follower read-index is correct, but
+                it needs a new RPC to fetch the leader's index. Every
+                client already finds the leader for writes, so leader-only
+                costs nothing extra on the client side.
+- Paper:        §8.
+- Viva Q:       "Your followers do nothing for reads. Isn't that wasteful?"
+- Answer:       For three nodes on one machine, yes, and that's fine.
+                Correctness first. Spreading reads would mean the follower
+                read-index variant, which keeps the same guarantee and only
+                adds an RPC.
+
+### A16. The interceptor runs a read barrier before refusing an unknown token on the leader
+- Chose:        Unknown token: on a follower, redirect. On the leader,
+                `check_leader()` then `read_barrier()`, then look again. Only
+                then UNAUTHENTICATED. A failed barrier gives UNAVAILABLE, never
+                UNAUTHENTICATED. The lookup moved into the call (the handler
+                body), out of `intercept_service`.
+- Alternatives: refuse immediately (Part A's behaviour); a barrier on *every*
+                request; put the token on the command and validate it inside
+                `apply()`.
+- Why:          A newly elected leader may not have applied a Login that an
+                earlier leader committed and acknowledged. Refusing would log
+                out a valid user exactly at failover, which is the moment
+                the demo is about. The barrier only runs on a miss, so the
+                normal path costs nothing. Validating inside `apply()` would
+                mean changing the M1 commands so they carry a token. The
+                barrier needs the call's context to abort, so it can't run in
+                `intercept_service`.
+- Paper:        §8 (precaution one: a new leader learns its commitIndex by
+                committing its no-op).
+- Viva Q:       "A user logged in on n1, n1 died, and their first request
+                lands on n2 before n2 has applied the Login. What happens?"
+- Answer:       n2 doesn't know the token, so it runs the read barrier. That
+                waits until n2's no-op commits and n2 has applied everything
+                before it, including the Login. The second lookup finds it,
+                and the request goes ahead. A test builds exactly this case.
+
+### A17. Client retry policy: follow hints at once, back off on everything else, same seq throughout
+- Chose:        A hint is followed immediately (at most `len(addresses)` in a
+                row). No hint, UNAVAILABLE or DEADLINE_EXCEEDED: back off
+                (0.05 s doubling to 1 s) and try the next node in the list.
+                Give up after 30 s with `ClusterUnavailable`. Per-attempt
+                deadline 8 s (CreateAuction 20 s). The seq is taken once per
+                operation.
+- Alternatives: random next node (the paper's "randomly-chosen servers");
+                retry the same node; no overall deadline; jittered backoff.
+- Why:          Round-robin reaches every node within one pass, and with
+                three nodes randomness buys nothing. Backoff stops clients
+                from hammering a cluster that is in an election. A hint chain
+                is capped because stale hints can point at a dead node or at
+                each other (trace step 2). DEADLINE_EXCEEDED means "don't
+                know", like UNAVAILABLE, and the same seq makes retrying safe.
+                The per-attempt deadline is above the server's 5 s commit
+                wait (A11), so the server's explicit answer normally wins.
+- Paper:        §8 ("clients then try again with randomly-chosen servers").
+- Viva Q:       "What stops your client from placing a bid twice when it
+                retries?"
+- Answer:       The retry is the same request object, with the same client_id
+                and seq. If the first attempt committed, the state machine
+                returns its stored response. The trace shows it: four
+                attempts, one seq, one bid.
+
+### A18. `ClusterClient`: one per user, one write at a time, pluggable invoker
+- Chose:        A `ClusterClient` holds one token and one seq counter, and is
+                not shared between threads. The RPC itself goes through an
+                `invoker(addr, service, method, request, metadata, timeout)`:
+                `GrpcInvoker` in real use, an in-memory one in tests.
+- Alternatives: one client for all users (the M1 demo shared one channel);
+                thread-safe with a lock; mock gRPC channels in tests.
+- Why:          The dedupe table keeps only the latest seq per client_id
+                (A5). Two writes in flight on one client_id could make the
+                lower one "stale". One client per user, sequential, is
+                exactly §8's model. The invoker seam lets the failover tests
+                run the real retry logic against a cluster whose nodes the
+                test crashes deterministically. The real-gRPC test covers the
+                `GrpcInvoker` path.
+- Paper:        §8.
+- Viva Q:       "Can two threads share one ClusterClient?"
+- Answer:       Not for writes. Their serial numbers would interleave and one
+                could be refused as stale. Use one client per thread or per
+                user.
+
+### A19. A read that can't be confirmed is UNAVAILABLE "read not confirmed; retry"
+- Chose:        `ReadNotConfirmedError` (a subclass of `OutcomeUnknownError`),
+                mapped to UNAVAILABLE with its own message.
+- Alternatives: serve the possibly stale local state with a warning flag;
+                reuse the write's "outcome unknown" message.
+- Why:          Serving stale data is exactly what read-index exists to
+                prevent. A subclass means every "retry later" handler already
+                catches it. The message differs because a read has no outcome
+                to be unsure about, and telling the client to keep its seq
+                would be misleading.
+- Paper:        §8 ("Linearizable reads must not return stale data").
+- Viva Q:       "A partitioned old leader gets a GetAuction. What does the
+                client see?"
+- Answer:       UNAVAILABLE after the read timeout, never the old data. The
+                client moves on to another node, finds the new leader, and
+                reads there.

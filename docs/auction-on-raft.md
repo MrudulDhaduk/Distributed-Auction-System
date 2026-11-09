@@ -407,3 +407,317 @@ microsecond datetimes are off by one. It is pinned by a strict xfail,
 | `client_id` is a bearer value. Knowing someone's `client_id` and `seq` returns their stored response, including a Login token. | not planned | Needs the client_id itself to leak. It is 128 random bits, kept by the client process. Binding it to the session would close it. |
 | The dedupe table grows by one entry per client forever. | not planned (no snapshots, P11) | Memory grows with the number of distinct clients, not with requests. |
 | `serve.py`'s peer port is plain TCP. | not in scope (A9) | Anyone who can reach it can send Raft RPCs. |
+
+---
+
+# Part B: reads, the client, failover
+
+Part A's first three gaps are closed below: reads (section 9), a brand-new
+leader that hasn't applied a Login yet (section 9c), and the client
+(section 10).
+
+## 9. Reads: leader-only, through read-index (`raft/node.py:360`) — A14, A15
+
+Resolving **seam 5**: "`GetAuction` / `ListAuctions` read local state. Decide
+leader-only vs. follower reads, and log it." The decision is **leader only**,
+with no log entry, using §8's two precautions (A15).
+
+### 9a. Why a plain local read is wrong, even on the leader
+
+A follower's state lags, so it can miss a bid that was already acknowledged.
+That one is obvious. The subtle case is a leader. §8: "the leader responding
+to the request might have been superseded by a newer leader of which it is
+unaware." Partition n1 away. n2 is elected and accepts a bid of 300. n1 has
+heard nothing, still thinks it leads, and its state says 150. A client that
+already saw "300 accepted" then reads 150. That is a stale read.
+`test_a_deposed_leader_that_has_not_noticed_cannot_serve_a_stale_read`
+builds exactly that case.
+
+### 9b. The rule and the code
+
+§8: "First, a leader must have the latest information on which entries are
+committed. [...] it needs to commit an entry from its term. Raft handles this
+by having each leader commit a blank no-op entry into the log at the start of
+its term. Second, a leader must check whether it has been deposed before
+processing a read-only request [...] by having the leader exchange heartbeat
+messages with a majority of the cluster before responding to read-only
+requests."
+
+`read_index(timeout)`, step by step:
+
+| step | lines | what |
+|---|---|---|
+| 1 | 393-396 | Stopped, or not leader: `NOT_LEADER`, with `leader_hint`. |
+| 2 | 399 | **Precaution one.** Wait until `commitIndex >= _term_start_index`, the index of this term's no-op (set at line 574). |
+| 3 | 402 | `read_index = commitIndex`. |
+| 4 | 404-409 | **Precaution two.** `_read_round += 1`, then send AppendEntries to every peer that has none in flight. |
+| 4 | 412 | Wait until `_round_acks(round) >= majority`, counting ourselves. |
+| 5 | 415 | Wait until `lastApplied >= read_index`. |
+| | 418 | `OK(read_index)`. The caller now reads its own state. |
+
+Steps 2 and 4 need us to still be leader of the same term
+(`_read_wait`, line 425, returns LEADERSHIP_LOST otherwise). Step 5 doesn't:
+entries up to `read_index` are committed, so applying them is correct even if
+we are deposed meanwhile.
+
+**Why step 2 is needed.** Leader Completeness says a new leader *has* every
+committed entry. It doesn't say the leader *knows* they are committed. In
+`test_a_new_leader_waits_for_its_no_op_before_choosing_the_read_index`, n1
+commits "a" with n3. n2 stores "a" but never learns it committed. n2 is then
+elected with commitIndex *below* "a". Taking commitIndex as the read index
+straight away would leave out an acknowledged write. The no-op commit is the
+moment the new leader's commitIndex catches up (R9).
+
+**Why step 4 makes the read safe.** A peer's reply in our term means that
+when the peer answered, which was *after* the read began, it had not moved to
+a later term. For a newer leader to exist, a majority must have voted in a
+later term, and any two majorities share a node. So if a majority answered
+us, no newer leader existed when the read began, and nothing was committed
+that we lack. **Any** reply in our term counts, including a consistency-check
+refusal, because "still in your term" is all the read needs (line 873).
+
+**How "an AppendEntries sent after the read began" is tracked.** There is one
+counter, `_read_round`, bumped per read. There is at most one AppendEntries in
+flight per peer (R7), so a single slot per peer, `_sent_round[peer]`,
+remembers which round that RPC was built in (line 590). When the reply comes
+back in the same term, `_acked_round[peer]` is raised to that round
+(line 873). A peer whose in-flight RPC was built *before* the read gets one
+more AppendEntries as soon as that reply arrives (line 906), not at the next
+tick. Acks are reset when a term starts (line 563): an answer to a previous
+term's leadership proves nothing about this one.
+
+**Nothing is written to the log**
+(`test_read_index_writes_nothing_to_the_log`).
+
+**Attribution.** The paper gives the two precautions. The exact ordering
+(record commitIndex *first*, then confirm) is the "ReadIndex" algorithm from
+Ongaro's PhD thesis, §6.4. I didn't quote that from a file in this repo.
+
+**The tests detect the bugs.** I removed each precaution in turn (step 2 made
+`lambda: True`, then step 4 made `lambda: True`) and ran the suite.
+- Without step 2: exactly
+  `test_a_new_leader_waits_for_its_no_op_before_choosing_the_read_index`
+  failed.
+- Without step 4: exactly
+  `test_a_deposed_leader_that_has_not_noticed_cannot_serve_a_read` failed.
+
+### 9c. Where it is used
+
+- `GetAuction` / `ListAuctions` (`server/auction_servicer.py:176`, `:228`)
+  call `replicator.read_barrier()` (`replication/replicator.py:110`) first.
+  NOT_LEADER becomes a redirect. Every other failure raises
+  `ReadNotConfirmedError` (line 62), which becomes UNAVAILABLE "read not
+  confirmed; retry". It never returns stale data.
+- **The interceptor** (`server/auth_interceptor.py:64` `_resolve`, A16). An
+  unknown token on the leader triggers the same barrier, then a second look.
+  A new leader that hasn't applied a recent Login catches up first, so the
+  user isn't refused
+  (`test_a_new_leader_accepts_a_token_it_has_not_applied_yet`, built with
+  the same "hold the commitIndex back" trick). If the barrier itself fails,
+  the answer is UNAVAILABLE, never UNAUTHENTICATED: we couldn't find out, so
+  we must not say no. The lookup moved from `intercept_service` into the
+  call, because the barrier blocks and has to abort through the call's
+  context.
+
+---
+
+## 10. The client (`client/auction_client.py`) — A17, A18
+
+§8: "If the client's first choice is not the leader, that server will reject
+the client's request and supply information about the most recent leader it
+has heard from [...] If the leader crashes, client requests will time out;
+clients then try again with randomly-chosen servers."
+
+`ClusterClient` (line 97) holds every node's client address. `_call`
+(line 135) works like this:
+
+| reply | action |
+|---|---|
+| OK | done; remember this node |
+| FAILED_PRECONDITION with a `leader-addr` hint (line 149) | go there **at once**. Hints are followed at most `len(addresses)` times in a row, so stale hints that point at each other can't spin. |
+| FAILED_PRECONDITION, no hint (an election is on) | back off, next node |
+| UNAVAILABLE / DEADLINE_EXCEEDED (line 156) | back off, next node |
+| anything else (UNAUTHENTICATED, ...) | raise; don't retry |
+
+Backoff starts at 0.05 s, doubles, and is capped at 1 s. After 30 s the call
+raises `ClusterUnavailable`.
+
+**The serial number.** A write takes its `seq` **once**, before the first
+attempt (`_next_seq`, line 125). Every retry resends the *same request
+object*, so the same `(client_id, seq)`. That is the client half of §8, and
+`test_a_write_retried_after_an_unknown_outcome_happens_once` checks it
+(several attempts, one distinct seq, one bid). Reads carry no seq.
+
+One `ClusterClient` per user, one write at a time (A18). The M1 CLI flow
+(`main()`) now builds four of them, one per user, against
+`--nodes 127.0.0.1:50071,...`.
+
+---
+
+## 11. A real trace: a bid while the leader is killed
+
+Three real `server.serve` processes (peer ports 50061-50063, client ports
+50071-50073, FileStorage in temp dirs) and three `ClusterClient`s. Login ×3,
+create, bid 100, bid 150. Then **`TerminateProcess` on the leader** (n1),
+with karan's next bid (200, `seq=3`) already on its way. These are the real
+log lines, trimmed only of the repeated startup lines.
+
+```
+                                       Indexes 1-7: no-op, 3 Logins, Create,
+                                       bid 100, bid 150. All committed.
+21:14:24.142 [n1] term 1: appended index 8        <- karan 200, seq 3
+21:14:24.143 [n2] appended 8..8 from leader       <- n2 has it; n3 does not
+=== 21:14:24 KILL n1 (TerminateProcess) ===
+CLIENT PlaceBid -> :50071: UNAVAILABLE (Connection reset ...); trying :50072 in 0.10s
+CLIENT PlaceBid -> :50072: not leader, redirected to 127.0.0.1:50071
+21:14:25.000 [n3] term 2 FOLLOWER -> CANDIDATE: election timeout
+21:14:25.001 [n2] term 2 FOLLOWER -> CANDIDATE: election timeout
+21:14:25.004 [n2] term 2: refused vote for n3 (already voted for n2 in term 2)
+21:14:25.004 [n3] term 2: refused vote for n2 (already voted for n3 in term 2)
+21:14:25.533 [n3] term 3 CANDIDATE -> CANDIDATE (was term 2): election timeout
+21:14:25.538 [n2] term 3: refused vote for n3 (candidate log (term 1, index 7)
+                                              is behind ours (term 1, index 8))
+21:14:25.946 [n2] term 4 CANDIDATE -> LEADER: won election with 2 votes
+21:14:25.947 [n2] term 4: appended no-op at index 9
+21:14:25.960 [n2] n3 has no (index 8, term 1): nextIndex -> 8
+21:14:25.962 [n3] appended 8..9 from leader
+21:14:25.963 [n2] term 4: commitIndex 7 -> 9
+CLIENT PlaceBid -> :50071: UNAVAILABLE (Connection refused ...); trying :50072 in 0.20s
+21:14:26.489 [n2] term 4: appended index 10       <- the retry, same seq 3
+21:14:26.492 [n2] term 4: commitIndex 9 -> 10
+bid karan 200: True Bid of 200 added high=200 by karan
+bids now: [('karan', 100), ('mrudul', 150), ('karan', 200)]
+karan's attempts: [(:50071, seq 3), (:50072, seq 3), (:50071, seq 3), (:50072, seq 3)]
+```
+
+What happened, step by step:
+
+1. **The kill lands mid-bid.** n1 had appended karan's bid at index 8 and
+   sent it to n2, but it died before hearing back from a majority. The client
+   sees "connection reset", so UNAVAILABLE: *outcome unknown*. Is the bid
+   placed? It is on 2 of 3 logs (n1, now dead, and n2), and it isn't
+   committed.
+2. **The client moves on.** It backs off 0.10 s and tries n2. n2 still
+   believes n1 is leader (term 1), so it redirects to n1. The client follows,
+   and the dead n1 refuses the connection. The connect attempt to the dead
+   node is what took ~2 s.
+3. **Split vote, then the election restriction.** n2 and n3 both time out
+   into term 2 and vote for themselves, so nobody wins. In term 3, n3 asks n2
+   for a vote. n2 refuses, *because n3's log (term 1, index 7) is behind its
+   own (term 1, index 8)*. That is §5.4.1 protecting index 8, an entry that
+   might be committed. In term 4, n2 wins.
+4. **Repair and indirect commit.** n2 appends its no-op at 9. n3 refuses
+   prevIndex 8 ("has no (index 8, term 1)"), so nextIndex backs off to 8
+   (R6). n3 then takes 8..9. Index 9 is a term-4 entry on a majority, so
+   commitIndex goes **7 → 9**. Index 8, karan's term-1 bid, commits
+   *indirectly* (Figure 8 rule). n2 applies it: dedupe has karan's
+   client_id at seq 2, and 3 > 2, so it **executes**. "Bid of 200 added" is
+   stored under `(karan, 3)`.
+5. **The retry is answered, not executed.** The client's fourth attempt
+   reaches n2 with the **same seq 3** and lands at index 10. When it is
+   applied, seq 3 == 3, so `apply_fn` returns the stored response. The bid is
+   placed **once**: `bids == [100, 150, 200]`. The reply's high bid
+   (200, karan) comes from the stored `Applied`.
+6. **Same token throughout.** karan never logged in again. n2 already had
+   karan's Login (index 3) applied.
+
+Without dedupe, step 5 would execute index 10 too. It would be refused ("Bid
+of 200 is not added because current highest bid is 200"), so karan would be
+told **no** about a bid that was in fact placed.
+
+---
+
+## 12. The five M1 → M2 seams
+
+| # | seam (CLAUDE.md) | resolved by | where |
+|---|---|---|---|
+| 1 | The closer calls `apply(CloseAuction)` on every node | Runs everywhere, proposes only on the leader, stamped with the leader's clock, one close in flight; `apply()` rejects duplicates | §6, A7, `server/closer.py:92` |
+| 2 | Handlers call `apply()` directly; PlaceBid reads the high bid after | `check_leader → (LLM) → stamp → submit → wait`; the high bid comes from `Applied` | §2, §4, A8, A10 |
+| 3 | SessionStore not replicated | `Login`/`Logout` are commands; the token is minted on the leader before proposing | §5, A3 |
+| 4 | Commands have no wire/disk encoding | `proto/commands.proto` + `replication/codec.py`, with pinned field numbers | §3, A1 |
+| 5 | Reads are local | Leader only, through `read_index` (§8's two precautions) | §9, A14, A15 |
+
+**Seam 4, confirmed.** Every entry in `log.bin` is a `Command` proto.
+`test_a_full_restart_rebuilds_identical_auction_and_session_state` crashes
+all three nodes and replays every command type from disk. It gets
+byte-identical state back, with the description, token and microsecond
+timestamps intact, and a pre-restart retry still dedupes.
+
+---
+
+## 13. Tests in this chunk
+
+New, all written before their code and shown red first, except
+`test_failover_grpc.py` (written after the client existed; `test_client.py`
+is its red counterpart):
+
+| file | what it pins |
+|---|---|
+| `test_codec.py` | round trip of every command type, pinned field numbers, garbage fails; the M1 µs bug (strict xfail) |
+| `test_state_machine.py` | dispatch, §8 dedupe (repeat, stale, per client, no-client, rejected remembered), high bid, fail-stop, determinism |
+| `test_replicator.py` | Applied / NotLeaderError with client address / OutcomeUnknownError (timeout, STOPPED) |
+| `test_sessions_on_raft.py` | Login replicated, redirect, retry returns the first token, Logout replicated, unknown token on a follower vs the leader |
+| `test_auction_on_raft.py` | bid to a follower redirected, then identical state on all 3; retried CreateAuction returns the original success; LLM down; follower never calls the LLM |
+| `test_closer.py` (adapted) | due scan, leader-only, one in flight, re-propose after failure, exactly once on a cluster, the new leader closes the overdue |
+| `test_serve_grpc.py` | real gRPC: peer port needs no token, client port does; redirect metadata over the wire |
+| `test_restart_replay.py` | all 3 crash, all 3 replay: identical auctions, sessions and dedupe (MemoryStorage: strict xfail) |
+| `test_raft_read_index.py` | read covers writes; follower refuses; deposed leader can't read; new leader waits for its no-op; nothing written to the log |
+| `test_reads_on_raft.py` | reads redirect on a follower; stale read refused; a new leader accepts a token it hadn't applied yet |
+| `test_client.py` | follows the hint; kill the leader with the same token and no lost bid; retry keeps its seq; UNAUTHENTICATED not retried; give up |
+| `test_failover_grpc.py` | the kill-the-leader scenario over real gRPC |
+
+**M1 tests adapted:** only `test_closer.py` (section 8).
+
+**Timing.** As in the Raft tests, the leader is chosen by giving one node a
+short election timeout, and "lagging" or "deposed" states are built by
+*losing messages*, not by racing. The tests that do run real clocks
+(`test_the_poll_threads_close_once_on_a_live_cluster`, the two gRPC files)
+only wait with bounded `wait_until`. Their assertions don't depend on how
+fast things happen. `test_serve_grpc.py` picks ports by binding port 0 and
+closing it, so another process could grab the port in between. That would be
+a loud bind error, not a wrong result.
+
+---
+
+## 14. How to see it yourself
+
+```powershell
+.\scripts\run_cluster.ps1            # LLM server + n1..n3, data in data\n1..n3
+.venv\Scripts\python.exe -m client.auction_client
+```
+
+Close the leader's window in the middle of the demo. The client logs its
+redirects and retries, and the bids continue. To restart a node, run its line
+from `.\scripts\run_cluster.ps1 -DryRun`. It replays its log from `data\` and
+catches up.
+
+---
+
+## 15. Known gaps (whole chunk)
+
+| gap | fixed by | what goes wrong today |
+|---|---|---|
+| Tokens are plain text in `log.bin` | not planned | Read access to a data dir means access to live sessions. |
+| `client_id` is a bearer value (A5) | not planned | Someone who learns a client's id and seq can fetch its stored response, including a Login token. |
+| The dedupe table and the session table grow forever; no snapshots (P11) | not planned | Memory grows with distinct clients and logins; replay time grows with the log. |
+| A garbage token sent to the leader costs one read barrier (a heartbeat round) | not planned | A cheap way to make the leader send extra heartbeats. |
+| The peer port is plain TCP (A9) | production: mTLS | Anyone who can reach it can send Raft RPCs. |
+| No check-quorum: a partitioned leader keeps believing it leads | not planned | Its *reads* are safe (read-index times out). Its *writes* time out with UNAVAILABLE and the client moves on. It just wastes a few seconds per client. |
+| A follower's leader hint can point at a dead leader (trace step 2) | not planned | One wasted connect attempt (~2 s on Windows) per client after a crash. |
+| M1 bug: `common/time_conv.py:25` loses 1 µs on ~2% of datetimes | your decision (section 8) | A bid stamped 1 µs after close can be recorded at close and accepted. Determinism is unaffected. |
+| The closer stamps with the leader's clock; leaders' clocks can differ | inherent | After a failover, `closed_at` follows the new leader's clock. Each close is still decided once, the same on every node. |
+| `ClusterClient` is not thread-safe; one write at a time per client_id | by design (A18) | Two concurrent writes on one client could make the lower seq "stale". |
+
+## 16. Things I am not fully sure about
+
+- **The read-index argument with in-memory acks.** A reply counts for a
+  round if its RPC was *built* after the round began (`_sent_round` is set in
+  `_prepare_appends`). I believe "built after" is enough, because the peer
+  answers after receiving it, which is after it was built. I'd still like
+  this checked against the chaos harness in step 7.
+- **Stale hints.** The cap of `len(addresses)` consecutive redirects is a
+  judgement call, not something the paper prescribes.
+- **2 s connect time to a dead node on Windows** (trace step 2). That is
+  gRPC's connection behaviour, which I haven't tuned on the client channel.
+  `raft/transport.py` caps reconnect backoff for peers, but the client
+  channel uses defaults.
