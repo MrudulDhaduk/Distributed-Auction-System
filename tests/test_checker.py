@@ -319,3 +319,12 @@ def test_a_run_saved_to_disk_is_checked_by_the_cli(tmp_path, capsys):
     save_run(tmp_path / "bad", history, dumps, leaders + [{"term": 1, "node": "n3", "source": "x"}])
     assert main([str(tmp_path / "bad")]) == 1
     assert f"FAIL  {P.ONE_LEADER_PER_TERM}" in capsys.readouterr().out
+
+
+def test_a_node_that_gave_no_dump_is_a_failure_not_ignored():
+    history, dumps, leaders = scenario()
+    dumps["n3"] = {"node_id": "n3", "error": "StatusCode.UNAVAILABLE"}
+    report = check_all(history, dumps, leaders)
+    assert P.IDENTICAL in failed(report)
+    assert "n3: no dump" in evidence(report, P.IDENTICAL)
+    assert P.ACKED_PRESENT not in failed(report)  # the other two are still checked

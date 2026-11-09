@@ -16,7 +16,8 @@ Inputs (plain data; the chaos harness writes them as JSON):
              token_hash            (login ok: digest.hash_token(token))
   dumps    {node_id: {"node_id", "digest_index", "state_digest", "state_json"}}
            -- StatusService.DumpState from every node, taken after the
-           cluster went quiet.
+           cluster went quiet. A node that could not be dumped is
+           {"node_id", "error"}: IDENTICAL fails on it, it is never skipped.
   leaders  list of {"term", "node", "source"}: every sighting of a LEADER
            (status polls, and "-> LEADER" lines in the node logs).
 
@@ -88,7 +89,7 @@ def _states(dumps) -> dict:
         try:
             out[node] = json.loads(d["state_json"])
         except (ValueError, KeyError):
-            pass
+            pass  # no dump, or not JSON: IDENTICAL reports it
     return out
 
 
@@ -198,6 +199,10 @@ def check_identical(dumps) -> PropertyResult:
     violations = []
     if not dumps:
         return _result(IDENTICAL, 0, ["no dumps: nothing to compare (did every node fail to answer?)"])
+    for node, d in sorted(dumps.items()):
+        if "error" in d:
+            violations.append(f"{node}: no dump ({d['error']})")
+    dumps = {n: d for n, d in dumps.items() if "error" not in d}
     for node, d in sorted(dumps.items()):
         actual = hashlib.sha256(d["state_json"].encode("utf-8")).hexdigest()
         if actual != d["state_digest"]:
