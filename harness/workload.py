@@ -77,6 +77,36 @@ class History:
             return list(self.records)
 
 
+def record_write(history, name, user, client, op, call, **fields) -> dict:
+    """Run call() -- ONE write on `client` -- and append what happened to
+    `history`: (client_id, seq), outcome ok / rejected / unknown, reason,
+    wall-clock start/end (epoch micros, for comparing with close_time) and
+    monotonic latency. The seq is read from the request actually sent
+    (client.sent is ClusterClient's public attempt trace)."""
+    start, m0 = now_us(), time.monotonic()
+    response, high_bid, high_bidder = None, 0, ""
+    try:
+        response = call()
+        outcome = "ok" if response.result.success else "rejected"
+        reason = response.result.reason
+    except ClusterUnavailable as e:
+        outcome, reason = "unknown", f"ClusterUnavailable: {e}"
+    except grpc.RpcError as e:
+        outcome, reason = "unknown", f"{e.code().name}: {e.details()}"
+    m1, end = time.monotonic(), now_us()
+    seq = client.sent[-1][2].seq if client.sent else 0
+    client.sent.clear()  # the attempt trace; not needed, and it would grow all run
+    if op == "bid" and response is not None:
+        high_bid, high_bidder = response.current_high_bid, response.current_high_bidder
+    record = dict(client=name, client_id=client.client_id, user=user, seq=seq, op=op,
+                  outcome=outcome, reason=reason, start=start, end=end, latency=m1 - m0, mono_end=m1,
+                  high_bid=high_bid, high_bidder=high_bidder, **fields)
+    if op == "login" and outcome == "ok":
+        record["token_hash"] = hash_token(response.token)
+    history.append(record)
+    return record
+
+
 class Board:
     """What the actors know about auctions: shared, best-effort, never
     trusted by the checker. Only used to choose sensible next requests."""
@@ -121,28 +151,7 @@ class Actor(threading.Thread):
     def write(self, op, call, **fields):
         """Run ONE write and record it. Only ever called from this actor's
         own thread, so this client never has two writes in flight."""
-        start, m0 = now_us(), time.monotonic()
-        response, high_bid, high_bidder = None, 0, ""
-        try:
-            response = call()
-            outcome = "ok" if response.result.success else "rejected"
-            reason = response.result.reason
-        except ClusterUnavailable as e:
-            outcome, reason = "unknown", f"ClusterUnavailable: {e}"
-        except grpc.RpcError as e:
-            outcome, reason = "unknown", f"{e.code().name}: {e.details()}"
-        m1, end = time.monotonic(), now_us()
-        seq = self.client.sent[-1][2].seq if self.client.sent else 0
-        self.client.sent.clear()  # the attempt trace; not needed, and it would grow all run
-        if op == "bid" and response is not None:
-            high_bid, high_bidder = response.current_high_bid, response.current_high_bidder
-        record = dict(client=self.name, client_id=self.client.client_id, user=self.user, seq=seq, op=op,
-                      outcome=outcome, reason=reason, start=start, end=end, latency=m1 - m0, mono_end=m1,
-                      high_bid=high_bid, high_bidder=high_bidder, **fields)
-        if op == "login" and outcome == "ok":
-            record["token_hash"] = hash_token(response.token)
-        self.w.history.append(record)
-        return record
+        return record_write(self.w.history, self.name, self.user, self.client, op, call, **fields)
 
     def login(self):
         while not self.w.stopping.is_set():
