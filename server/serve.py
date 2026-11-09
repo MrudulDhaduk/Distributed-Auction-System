@@ -7,13 +7,15 @@
 Two gRPC servers, on two ports (docs/decisions.md, A9):
   CLIENT port   AuthService + AuctionService, behind the AuthInterceptor.
                 What clients dial.
-  PEER port     RaftService only, NO interceptor. Raft RPCs come from the
+  PEER port     RaftService + StatusService, NO interceptor. Raft RPCs come from the
                 other nodes and carry no session token; putting them behind
                 the auth check would refuse every heartbeat. In production
                 this port would be reachable only by the other nodes and
                 protected by mutual TLS (each node proves it is a cluster
                 member with a certificate). Here it is plain TCP on
-                127.0.0.1.
+                127.0.0.1. StatusService (proto/status.proto) is the
+                read-only view the dashboard and chaos harness poll; it
+                sits here for the same reason (docs/decisions.md, T2).
 
 --peers lists the OTHER nodes as id=host:peer_port:client_port. The peer
 port is where this node sends RequestVote/AppendEntries; the client port is
@@ -40,7 +42,7 @@ from typing import Optional
 
 import grpc
 
-from generated import auction_pb2_grpc, raft_pb2_grpc
+from generated import auction_pb2_grpc, raft_pb2_grpc, status_pb2_grpc
 from llm_server import config as llm_config
 from raft.file_storage import CorruptStorageError, FileStorage
 from raft.node import DEFAULT_ELECTION_TIMEOUT, DEFAULT_HEARTBEAT_INTERVAL, RaftNode
@@ -53,6 +55,7 @@ from server.auction_servicer import AuctionServicer
 from server.auth_interceptor import AuthInterceptor
 from server.auth_servicer import AuthServicer
 from server.closer import DEFAULT_INTERVAL_SECONDS, AuctionCloser
+from server.status_servicer import StatusServicer
 from server.llm_client import LLMClient
 from sessions.store import SessionStore
 
@@ -146,6 +149,9 @@ class AuctionNode:
             futures.ThreadPoolExecutor(max_workers=PEER_WORKERS, thread_name_prefix=f"{node_id}-peer"),
         )
         raft_pb2_grpc.add_RaftServiceServicer_to_server(RaftServicer(self.raft), self.peer_server)
+        status_pb2_grpc.add_StatusServiceServicer_to_server(
+            StatusServicer(self.raft, self.state_machine), self.peer_server
+        )
         self._bind(self.peer_server, host, peer_port, "peer")
 
     @staticmethod

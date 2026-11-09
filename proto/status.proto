@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package status;
+
+// Observability for the dashboard, the chaos harness and the property
+// checker (docs/testing-and-chaos.md). Served on the PEER port, next to
+// RaftService, with no auth interceptor: the callers are operator tools, not
+// users, and carry no session token (same reasoning as RaftService,
+// docs/decisions.md A9 and T2). In production this port is reachable only
+// from inside the cluster.
+//
+// Read-only. Nothing here changes Raft or auction state, and nothing here
+// goes through the log: it reports THIS node's local view, which may be
+// stale (a follower's, or a deposed leader's). That is the point: the
+// dashboard wants to see disagreement when it happens.
+
+service StatusService {
+  rpc GetNodeStatus(NodeStatusRequest) returns (NodeStatus);
+  // Debug only: the whole applied state, for the checker.
+  rpc DumpState(DumpStateRequest) returns (StateDump);
+}
+
+message NodeStatusRequest {}
+
+message NodeStatus {
+  string node_id = 1;
+  string role = 2;              // FOLLOWER / CANDIDATE / LEADER
+  int64 term = 3;               // currentTerm
+  string leader_id = 4;         // "" when unknown
+  string voted_for = 5;         // "" when none in this term
+  int64 commit_index = 6;       // Figure 2: commitIndex
+  int64 last_applied = 7;       // Figure 2: lastApplied
+  int64 last_log_index = 8;
+  int64 last_log_term = 9;
+  // sha256 hex of the canonical applied state (replication/digest.py):
+  // auctions, sessions (tokens hashed) and the dedupe table. Two nodes
+  // with equal digest_index must have equal digests.
+  string state_digest = 10;
+  // The index of the last COMMAND entry folded into state_digest. Can be
+  // below last_applied: no-op entries never reach the state machine.
+  int64 digest_index = 11;
+}
+
+message DumpStateRequest {}
+
+message StateDump {
+  string node_id = 1;
+  int64 digest_index = 2;
+  string state_digest = 3;
+  // The canonical JSON the digest is computed over, byte for byte:
+  // state_digest == sha256(state_json.encode("utf-8")). Auctions sorted
+  // by id, bids in the order applied.
+  string state_json = 4;
+}
