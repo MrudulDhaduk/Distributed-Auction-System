@@ -9,6 +9,8 @@ import grpc
 
 from auction.state import AuctionState
 from generated import auction_pb2_grpc
+from replication.replicator import LocalReplicator
+from replication.state_machine import StateMachine
 from sessions.store import SessionStore
 
 from server.auction_servicer import AuctionServicer
@@ -21,7 +23,7 @@ from server.llm_client import LLMClient
 def serve(port: int = 50051):
     sessions = SessionStore()
     state = AuctionState()
-    closer = AuctionCloser(state)
+    closer = AuctionCloser(state, LocalReplicator(StateMachine(auctions=state)))
     llm_client = LLMClient()
 
     server = grpc.server(
