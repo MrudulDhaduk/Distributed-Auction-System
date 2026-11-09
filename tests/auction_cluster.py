@@ -20,6 +20,10 @@ from raft.storage import MemoryStorage
 from raft.transport import InMemoryTransport
 from replication.replicator import RaftReplicator
 from replication.state_machine import StateMachine
+from server.auction_servicer import AuctionServicer
+from server.auth_interceptor import AuthInterceptor
+from server.auth_servicer import AuthServicer
+from sessions.store import SessionStore
 
 FAST = dict(election_timeout=(0.15, 0.30), heartbeat_interval=0.03)
 LEADER_FIRST = dict(election_timeout=(0.05, 0.10), heartbeat_interval=0.03)
@@ -64,11 +68,32 @@ class LoseReplies(Transport):
         return reply
 
 
+class FakeLLMClient:
+    """Stands in for server/llm_client.py: records calls, returns a canned
+    answer, or raises `error` (a grpc.RpcError = the LLM server is down)."""
+
+    def __init__(self):
+        self.calls = []
+        self.answer = "a fine specimen"
+        self.error = None
+
+    def get_llm_answer(self, request_id, query, context):
+        self.calls.append((request_id, query, context))
+        if self.error is not None:
+            raise self.error
+        return self.answer
+
+
 class Node:
     """One cluster member: everything serve.py wires together, minus gRPC."""
 
     def __init__(self, nid, raft, sm, replicator, storage):
         self.id, self.raft, self.sm, self.replicator, self.storage = nid, raft, sm, replicator, storage
+        self.sessions = SessionStore(sm.sessions, replicator)
+        self.auth = AuthServicer(self.sessions)
+        self.interceptor = AuthInterceptor(self.sessions, replicator)
+        self.llm = FakeLLMClient()
+        self.auction = AuctionServicer(sm.auctions, self.llm)
 
     def snapshot(self):
         return self.sm.snapshot()
@@ -170,3 +195,49 @@ class AuctionCluster:
 
     def snapshots(self):
         return {nid: node.snapshot() for nid, node in self.nodes.items()}
+
+
+# --- the server-side stack, called directly (no sockets) ------------------------
+#
+# call() runs a request through exactly what a gRPC server would run it
+# through: the node's AuthInterceptor, then the servicer method. A fake
+# context stands in for grpc.ServicerContext: abort() raises RpcAbort,
+# carrying whatever trailing metadata the handler set first.
+
+from collections import namedtuple  # noqa: E402
+
+import grpc  # noqa: E402
+
+from common.wire import TOKEN_METADATA_KEY  # noqa: E402
+
+HandlerCallDetails = namedtuple("HandlerCallDetails", ["method", "invocation_metadata"])
+
+
+class RpcAbort(Exception):
+    def __init__(self, code, details, trailing):
+        super().__init__(f"{code.name}: {details}")
+        self.code, self.details, self.trailing = code, details, dict(trailing)
+
+
+class FakeContext:
+    def __init__(self, metadata):
+        self._metadata = tuple(metadata)
+        self._trailing = ()
+
+    def invocation_metadata(self):
+        return self._metadata
+
+    def set_trailing_metadata(self, metadata):
+        self._trailing = tuple(metadata)
+
+    def abort(self, code, details):
+        raise RpcAbort(code, details, self._trailing)
+
+
+def call(node, service, method, request, token=None):
+    servicer = {"AuthService": node.auth, "AuctionService": node.auction}[service]
+    handler = grpc.unary_unary_rpc_method_handler(getattr(servicer, method))
+    metadata = [(TOKEN_METADATA_KEY, token)] if token else []
+    details = HandlerCallDetails(f"/auction.{service}/{method}", metadata)
+    wrapped = node.interceptor.intercept_service(lambda _: handler, details)
+    return wrapped.unary_unary(request, FakeContext(metadata))

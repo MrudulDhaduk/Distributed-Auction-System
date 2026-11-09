@@ -8,3 +8,10 @@ their own copy and drifting apart.
 """
 
 TOKEN_METADATA_KEY = "token"
+
+# M2 (Raft): a node that is not the leader rejects with FAILED_PRECONDITION
+# and names the leader in TRAILING metadata under these keys (auction.proto,
+# design note 3). leader-addr is the leader's CLIENT address, host:port, the
+# one a client can dial; leader-id is its Raft node id, for logs.
+LEADER_ID_METADATA_KEY = "leader-id"
+LEADER_ADDR_METADATA_KEY = "leader-addr"

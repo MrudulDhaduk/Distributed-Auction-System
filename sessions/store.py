@@ -1,10 +1,32 @@
-"""In-memory session store.
+"""SessionStore: create / validate / destroy, now over REPLICATED state.
 
-Deliberately NOT part of auction.state.apply() and NOT replicated. Raft-backed
-sessions are a stretch goal (problem statement, section 8) and need Raft to
-exist first. This class exists so that stretch goal is a swap of this class
-for a Raft-backed one, not surgery across every handler that checks a
-session: everything else only ever calls create()/validate()/destroy().
+M1 planned this swap. Its docstring said: "This class exists so that
+stretch goal is a swap of this class for a Raft-backed one, not surgery
+across every handler that checks a session: everything else only ever
+calls create()/validate()/destroy()." The shape is kept; what is behind it
+changed (docs/decisions.md, A3):
+
+  create(username) -> token
+      Mints the token HERE, on the leader, with secrets.token_urlsafe,
+      BEFORE proposing, and proposes Login(token, username). Randomness
+      happens once, outside apply(); the token is replicated as data. Same
+      pattern as the LLM description on CreateAuction. Returns the token
+      that apply_fn put in the table. On a dedupe hit (a retried Login with
+      the same client_id and seq) that is the FIRST attempt's token, not
+      the one just minted, which was never stored.
+  validate(token) -> username | None
+      Reads THIS node's applied SessionState (sessions/state.py). On a
+      follower that can lag the leader; server/auth_interceptor.py deals
+      with that. No Raft round.
+  destroy(token)
+      Proposes Logout(token).
+
+create() and destroy() raise NotLeaderError / OutcomeUnknownError
+(replication/replicator.py) like any other write; the servicer maps them.
+
+With no replicator, SessionStore() is a cluster of one with no Raft
+(LocalReplicator), so the M1 unit tests run unchanged, through the real
+command encoding.
 
 No TTL. A session lives until an explicit destroy(). Expiry would need a wall
 clock inside validate(), and once sessions are replicated, two nodes with
@@ -15,7 +37,11 @@ command with the time carried on the command, not a clock read in validate().
 """
 
 import secrets
-from dataclasses import dataclass
+from typing import Optional
+
+from replication.replicator import LocalReplicator
+from replication.state_machine import StateMachine
+from sessions.state import Login, Logout, SessionState
 
 # secrets, not random: `random` is a deterministic PRNG meant to be seeded
 # and reproduced -- exactly the property an auth token must NOT have. secrets
@@ -24,29 +50,32 @@ from dataclasses import dataclass
 TOKEN_BYTES = 32
 
 
-@dataclass(frozen=True)
-class SessionInfo:
-    username: str
+class SessionRefused(Exception):
+    """The Login command was applied and said no: a stale serial number,
+    or (never in practice) a token collision."""
 
 
 class SessionStore:
-    """Maps opaque tokens to the username that created them."""
+    def __init__(self, state: SessionState = None, replicator=None):
+        self._state = state if state is not None else SessionState()
+        if replicator is None:
+            replicator = LocalReplicator(StateMachine(sessions=self._state))
+        self._replicator = replicator
 
-    def __init__(self):
-        self._sessions: dict[str, SessionInfo] = {}
-
-    def create(self, username: str) -> str:
-        """Mint a new token for username and return it."""
+    def create(self, username: str, client_id: str = "", seq: int = 0) -> str:
+        """Mint a token, replicate Login, return the token now in the table."""
         token = secrets.token_urlsafe(TOKEN_BYTES)
-        self._sessions[token] = SessionInfo(username=username)
-        return token
+        applied = self._replicator.submit(Login(token=token, username=username), client_id, seq)
+        if not applied.result.success:
+            raise SessionRefused(applied.result.reason)
+        return applied.token
 
-    def validate(self, token: str) -> str | None:
-        """Return the username for token, or None if it names no session."""
-        info = self._sessions.get(token)
-        return info.username if info is not None else None
+    def validate(self, token: str) -> Optional[str]:
+        """Return the username for token, or None if it names no session
+        on this node, as of what this node has applied."""
+        return self._state.validate(token)
 
-    def destroy(self, token: str) -> None:
-        """Remove token's session, if any. Destroying an unknown or
+    def destroy(self, token: str, client_id: str = "", seq: int = 0) -> None:
+        """Replicate Logout(token). Destroying an unknown or
         already-destroyed token is not an error."""
-        self._sessions.pop(token, None)
+        self._replicator.submit(Logout(token=token), client_id, seq)

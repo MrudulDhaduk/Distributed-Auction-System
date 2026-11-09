@@ -9,6 +9,14 @@ AuthService.Login is exempt: you cannot present a token in order to obtain
 one. Every other RPC -- Logout included -- is rejected with UNAUTHENTICATED
 if the token is missing or SessionStore.validate() doesn't recognise it.
 
+M2 (Raft): sessions are replicated, and validate() reads THIS node's
+applied state, which on a follower can lag the leader. A token minted a
+moment ago may simply not have arrived yet. So an unrecognised token is
+only refused by the LEADER; a follower cannot tell "unknown" from "not
+here yet", and redirects instead (FAILED_PRECONDITION + leader-addr, the
+same answer it gives every RPC). A missing token is refused everywhere:
+there is nothing to look up. (docs/decisions.md, A4.)
+
 Only unary-unary RPCs are handled. Every RPC in auction.proto is
 unary-unary today; a streaming RPC added later would need its own wrapping
 here (a different RpcMethodHandler shape), which is a deliberate gap, not
@@ -18,6 +26,8 @@ an oversight.
 import grpc
 
 from common.wire import TOKEN_METADATA_KEY
+from replication.replicator import NotLeaderError
+from server.errors import abort_not_leader
 
 EXEMPT_METHODS = frozenset({
     "/auction.AuthService/Login",
@@ -45,8 +55,21 @@ def _reject(context, details):
 
 
 class AuthInterceptor(grpc.ServerInterceptor):
-    def __init__(self, session_store):
+    def __init__(self, session_store, replicator=None):
+        """replicator: this node's RaftReplicator, to ask "am I the
+        leader?". None = a cluster of one (M1 unit tests): always leader."""
         self._session_store = session_store
+        self._replicator = replicator
+
+    def _not_leader(self):
+        """The NotLeaderError to redirect with, or None if we are leader."""
+        if self._replicator is None:
+            return None
+        try:
+            self._replicator.check_leader()
+        except NotLeaderError as e:
+            return e
+        return None
 
     def intercept_service(self, continuation, handler_call_details):
         if handler_call_details.method in EXEMPT_METHODS:
@@ -57,6 +80,13 @@ class AuthInterceptor(grpc.ServerInterceptor):
         username = self._session_store.validate(token) if token else None
 
         if username is None:
+            not_leader = self._not_leader() if token else None
+            if not_leader is not None:
+                def redirect(request, context):
+                    abort_not_leader(context, not_leader)
+
+                return grpc.unary_unary_rpc_method_handler(redirect)
+
             def reject(request, context):
                 _reject(context, "missing or invalid session token")
 
