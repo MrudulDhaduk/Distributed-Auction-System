@@ -42,7 +42,7 @@ def parse_peers(text: str) -> dict:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Run one Raft node (leader election only).")
+    p = argparse.ArgumentParser(description="Run one Raft node (election + replication; no client RPC yet).")
     p.add_argument("--id", required=True, help="this node's id, e.g. n1")
     p.add_argument("--port", type=int, required=True, help="port to serve RaftService on")
     p.add_argument("--host", default="127.0.0.1", help="interface to bind (default: local only)")
