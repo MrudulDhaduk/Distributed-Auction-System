@@ -3,11 +3,21 @@ ListAuctions.
 
 Translates between the wire (auction_pb2 messages) and the domain
 (auction/state.py commands): unwrap the request, build a command, hand it
-to AuctionState.apply(), wrap the Result back up. No auction logic lives
-here -- every decision is apply()'s.
+to the Raft log, wrap the Result back up. No auction logic lives here --
+every decision is apply()'s.
+
+M2 (Raft): handlers no longer call apply(). Every write goes
+    leader check -> (LLM call, CreateAuction only) -> stamp curr_time ->
+    replicator.submit(): encode -> raft.propose() -> wait -> Applied
+and replies with the response apply_fn produced for that entry, on the
+leader, after it was committed and applied (Figure 2, Leaders: "respond
+after entry applied to state machine"). AuctionState.apply() now runs on
+the applier thread of every node, never on a handler thread.
+server/errors.py maps NotLeaderError / OutcomeUnknownError to gRPC codes.
 
 No SessionStore: the interceptor resolves context.username before any
-handler runs, so this class only needs AuctionState.
+handler runs, so this class only needs AuctionState (for reads) and the
+replicator (for writes).
 
 Command dataclasses are imported qualified as `commands.X`, not bare, so
 `commands.CreateAuction` (the dataclass) can never be confused with
@@ -15,8 +25,9 @@ Command dataclasses are imported qualified as `commands.X`, not bare, so
 
 CreateAuction also takes an LLMClient (server/llm_client.py). Call first,
 replicate second -- see llm.proto's ordering note: _describe() below runs
-BEFORE apply(), and its result is frozen onto the command as plain text.
-apply() never hears about the LLM call.
+BEFORE propose(), and its result is frozen onto the command as plain text.
+apply() never hears about the LLM call. The leader check comes BEFORE the
+LLM call, so a follower never calls the model.
 """
 
 import logging
@@ -28,6 +39,9 @@ from auction import state as commands
 from auction.state import AuctionState
 from common import time_conv
 from generated import auction_pb2, auction_pb2_grpc
+from replication.replicator import LocalReplicator
+from replication.state_machine import StateMachine
+from server.errors import raft_errors
 from server.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -38,13 +52,20 @@ def _to_pb_result(result: commands.Result) -> auction_pb2.Result:
 
 
 class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
-    def __init__(self, state: AuctionState, llm_client: LLMClient):
+    def __init__(self, state: AuctionState, llm_client: LLMClient, replicator=None):
+        """state: this node's AuctionState, the one its StateMachine
+        applies to; the handlers only READ it. replicator: this node's
+        RaftReplicator. None = a cluster of one without Raft
+        (LocalReplicator), so the M1 unit tests run unchanged."""
         self._state = state
         self._llm = llm_client
+        if replicator is None:
+            replicator = LocalReplicator(StateMachine(auctions=state))
+        self._replicator = replicator
 
     def _describe(self, request: auction_pb2.CreateAuctionRequest) -> str:
         """Item description for a new auction, or "" on no attributes /
-        LLM outage. Runs before apply() -- see the module docstring.
+        LLM outage. Runs before propose() -- see the module docstring.
 
         No attributes supplied: skip the call outright rather than
         invoking GenerateItemDescription with an empty list, which
@@ -82,19 +103,26 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
 
         Owner comes from the validated token (context.username), never
         from the request -- same rule as PlaceBid's bidder.
+
+        Order matters: leader check, THEN the LLM call (seconds of CPU on
+        the model server), THEN propose. A follower stops at the first
+        step. propose() checks leadership again, for real; the pre-check
+        only spares a follower the call.
         """
-        close_time = time_conv.micros_to_dt(request.close_time)
-        description = self._describe(request)
-        command = commands.CreateAuction(
-            auction_id=request.auction_id,
-            item=request.item,
-            close_time=close_time,
-            owner=context.username,
-            description=description,
-        )
-        result = self._state.apply(command)
+        with raft_errors(context):
+            self._replicator.check_leader()
+            close_time = time_conv.micros_to_dt(request.close_time)
+            description = self._describe(request)
+            command = commands.CreateAuction(
+                auction_id=request.auction_id,
+                item=request.item,
+                close_time=close_time,
+                owner=context.username,
+                description=description,
+            )
+            applied = self._replicator.submit(command, request.client_id, request.seq)
         return auction_pb2.CreateAuctionResponse(
-            result=_to_pb_result(result),
+            result=_to_pb_result(applied.result),
             auction_id=request.auction_id,
         )
 
@@ -107,33 +135,30 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
         from the request -- a caller cannot bid as someone else. The
         timestamp is stamped here, once, so apply() stays deterministic.
         All validation (auction exists, closed, past deadline, amount too
-        low) lives in apply(). The high-bid fields in the response are an
-        advisory hint so a rejected bidder can re-bid without a second
-        round trip.
-        """
-        curr_time = time_conv.now_utc()
-        command = commands.PlaceBid(
-            auction_id=request.auction_id,
-            bidder=context.username,
-            amount=request.amount,
-            curr_time=curr_time,
-        )
-        result = self._state.apply(command)
+        low) lives in apply().
 
-        # Lock-free read: can be stale relative to `result`, never torn --
-        # list.append is atomic under the GIL and BidEntry is frozen, so an
-        # iterator only ever sees complete entries.
-        auction = self._state.auctions.get(request.auction_id)
-        high_bid = 0
-        high_bidder = ""
-        if auction is not None and auction["bids"]:
-            top = max(auction["bids"], key=lambda b: b.bid_amount)
-            high_bid = top.bid_amount
-            high_bidder = top.bidder
+        curr_time is THIS node's clock, read once, here, before proposing.
+        On a follower propose() refuses, so its reading is thrown away:
+        only a leader's stamp ever enters the log.
+
+        The high-bid fields come from the apply result (Applied.high_bid,
+        replication/state_machine.py): the high bid right after THIS bid
+        was applied, read on the applier thread. M1 read it here, after
+        apply(), lock-free, and it could be stale. (docs/decisions.md, A8.)
+        """
+        with raft_errors(context):
+            curr_time = time_conv.now_utc()
+            command = commands.PlaceBid(
+                auction_id=request.auction_id,
+                bidder=context.username,
+                amount=request.amount,
+                curr_time=curr_time,
+            )
+            applied = self._replicator.submit(command, request.client_id, request.seq)
         return auction_pb2.PlaceBidResponse(
-            result=_to_pb_result(result),
-            current_high_bid=high_bid,
-            current_high_bidder=high_bidder,
+            result=_to_pb_result(applied.result),
+            current_high_bid=applied.high_bid,
+            current_high_bidder=applied.high_bidder,
         )
 
     def GetAuction(

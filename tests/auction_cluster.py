@@ -93,7 +93,7 @@ class Node:
         self.auth = AuthServicer(self.sessions)
         self.interceptor = AuthInterceptor(self.sessions, replicator)
         self.llm = FakeLLMClient()
-        self.auction = AuctionServicer(sm.auctions, self.llm)
+        self.auction = AuctionServicer(sm.auctions, self.llm, replicator)
 
     def snapshot(self):
         return self.sm.snapshot()
