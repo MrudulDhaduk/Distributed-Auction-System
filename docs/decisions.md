@@ -1707,3 +1707,396 @@ end of that file.
                 the same truncated time. The bug lost a microsecond against
                 what the user saw, not between replicas. Now it is exact
                 integer arithmetic, tested on 200 000 random values.
+
+### T2. StatusService on the PEER port, no auth, each node's own local view
+- Chose:        `proto/status.proto` with `GetNodeStatus` and `DumpState`,
+                registered on the peer server next to `RaftService`. It reads
+                the node's local Raft status and local applied state. Nothing
+                goes through the log.
+- Alternatives: on the client port behind the AuthInterceptor; a
+                read-index'd (linearizable) status; a separate third port.
+- Why:          The callers are operator tools (dashboard, chaos, checker), not
+                users, and have no session token. The client port's interceptor
+                would refuse them, exactly as it would refuse heartbeats (A9).
+                A linearizable status would defeat the purpose: we want to SEE
+                a stale follower or a deposed leader, not hide it. A third port
+                is one more thing to configure for no gain.
+- Paper:        Figure 2 (the fields reported); §5.1 (stale leaders exist).
+- Viva Q:       "Your status RPC has no authentication. Isn't that a hole?"
+- Answer:       It is on the peer port, which only cluster members should
+                reach (mTLS in production, 127.0.0.1 here). It's read-only, and
+                it never shows a session token, only a hash (T3).
+
+### T3. Digest = sha256 of one canonical JSON; tokens hashed; dedupe included
+- Chose:        `replication/digest.py`: auctions as a list sorted by id,
+                bids in applied order, times as int epoch micros, sessions as
+                sorted `[hash_token(token), user]`, the dedupe table as sorted
+                `[client_id, seq, response]`; `json.dumps(sort_keys=True,
+                separators=(",", ":"))`; sha256 of the UTF-8 bytes.
+- Alternatives: `hash()` of Python objects (salted per process, so useless
+                across nodes); pickle (not canonical, version-dependent);
+                digest only auctions + sessions, as first asked; a running
+                hash updated in apply_fn.
+- Why:          A digest is only meaningful if equal state means equal bytes,
+                in every process, so every choice in the encoding is pinned.
+                The dedupe table is included because it IS replicated state
+                (A5): a node whose table differed would answer a retry
+                differently after failover, and that's exactly the kind of
+                divergence auctions-only would miss. A running hash would
+                put code in apply_fn that no test of the state could check.
+- Paper:        Figure 3, State Machine Safety (what "agree" means).
+- Viva Q:       "Two nodes show the same digest. What does that prove?"
+- Answer:       That their canonical JSON is byte-identical, barring a sha256
+                collision. Every auction, every bid in order, every session
+                and every dedupe entry is equal. The checker also compares
+                the full JSON, so it doesn't rely on the hash alone.
+
+### T4. `digest_index`: recorded inside apply_fn, separate from lastApplied
+- Chose:        `StateMachine._last_index = index` at the top of `apply_fn`,
+                under the state machine lock; `indexed_snapshot()` returns
+                `(index, snapshot)` together. `snapshot()` is unchanged.
+                StatusServicer caches the digest by that index.
+- Alternatives: use Raft's `lastApplied` (read under a different lock, so the
+                pair could be inconsistent); put the index into `snapshot()`
+                (would change what existing tests compare).
+- Why:          The label must describe exactly the state hashed. Only the
+                state machine lock gives that. No-ops never reach apply_fn,
+                so the index can trail lastApplied, and that's honest. The
+                cache works because the state changes only when apply_fn
+                runs, and apply_fn always moves the index.
+- Paper:        Figure 2, lastApplied.
+- Viva Q:       "Why can digest_index be lower than lastApplied?"
+- Answer:       lastApplied counts every entry, including the leader's
+                no-op at the start of each term. digest_index is the last
+                entry that actually reached the state machine.
+
+### T5. DumpState returns the canonical JSON string, not a typed proto
+- Chose:        `StateDump { node_id, digest_index, state_digest, state_json }`.
+- Alternatives: a typed `AuctionDump { repeated BidDump ... }` message tree.
+- Why:          The digest is defined as sha256 of those exact bytes. Shipping
+                them lets the checker verify the digest itself and diff two
+                nodes field by field with one generic function. A typed tree
+                would need a second canonical encoding on the checker side,
+                and that second encoding could be the thing that is wrong.
+- Viva Q:       "Isn't JSON in a proto field a hack?"
+- Answer:       For a debug dump, it's the point. The bytes are the
+                definition of the digest, so the checker can recompute it.
+                Production RPCs stay typed.
+
+### T6. Faults on real processes: TerminateProcess and NtSuspendProcess, on the process tree
+- Chose:        `harness/procs.py`. kill -9 = `TerminateProcess` on the
+                interpreter, then the launcher, then `wait()`. Suspend/resume =
+                `NtSuspendProcess`/`NtResumeProcess` on every process in the
+                tree (Toolhelp32 snapshot). SIGKILL/SIGSTOP/SIGCONT on POSIX.
+                No psutil.
+- Alternatives: psutil (not installed, and it would also need the tree
+                walk); in-process "crashes" like the tests' `stop()` (not a real
+                kill: the finally blocks run); Ctrl+C (runs handlers).
+- Why:          A chaos test of persistence is only meaningful if the process
+                gets no chance to clean up. TerminateProcess is that on
+                Windows. The tree walk is there because a venv's python.exe is
+                a launcher whose CHILD is the real interpreter (measured:
+                suspending only the launcher let the child count 13 -> 57).
+                `wait()` before restart so two processes never open one data
+                dir.
+- Viva Q:       "How do you know your kill is really a kill -9?"
+- Answer:       TerminateProcess ends the process with no notification. The
+                exit code is 1, no atexit ran, and the node log just stops.
+                The restarted node rebuilds from disk, which is what P11 tests.
+
+### T7. The workload rule: one ClusterClient per actor; bid identity by amount residue
+- Chose:        Every actor (seller, bidder, racer) is a thread with its own
+                ClusterClient and issues writes one after another. Bidder i
+                bids only `amount % (bidders + 1) == i + 1`. Races use residue
+                0 and racers with distinct usernames. Racers skip a call if
+                its amount is not above their own last bid there.
+- Alternatives: a thread pool sharing clients (breaks the dedupe rule: an
+                older seq would be refused as stale); add more users to
+                `server/auth_servicer.py` so each client has a unique name
+                (an M1 file, handle with care); identify bids by client_id
+                (the state stores only the username).
+- Why:          The state stores `(bidder, amount, time)`, and bidder is a
+                username shared by several clients. The residue scheme makes
+                `(auction, bidder, amount)` unique across the whole history
+                without touching M1 code, and `history-well-formed` checks
+                it, so it is verified, not assumed.
+- Paper:        §8 (one serial number sequence per client).
+- Viva Q:       "With four usernames and seven clients, how does the checker
+                know WHOSE bid is in the state?"
+- Answer:       No two clients ever send the same amount to the same auction.
+                Each bidder owns a residue class mod M, and the race amounts own
+                residue 0 with distinct usernames. So the triple names exactly
+                one request, and the checker re-checks that in every run.
+
+### T8. Outcomes: ok / rejected / unknown; any RpcError is "unknown"
+- Chose:        `record_write`: a reply with `success` -> ok; with
+                `!success` -> rejected (reason recorded); `ClusterUnavailable`
+                or any other `RpcError` -> unknown. The seq is read from the
+                request actually sent (`client.sent[-1]`).
+- Alternatives: treat UNAUTHENTICATED etc. as "rejected"; read the client's
+                private `_seq`.
+- Why:          Being conservative is free here. "unknown" only claims "0 or 1
+                times", which is true of a request that definitely did not
+                run. Calling something "rejected" that we can't prove was
+                refused by the state machine would make the checker assert
+                things it can't know. `client.sent` is the client's public trace.
+- Viva Q:       "What's the difference between rejected and unknown?"
+- Answer:       Rejected means the state machine answered no, so the bid must
+                not be in the state. Unknown means no definite answer reached
+                the client, so the bid may be there once, or not at all.
+
+### T9. Seeded schedule: one episode at a time; the leader is resolved at run time
+- Chose:        `harness/schedule.py`: a private `random.Random(seed)` draws
+                times, actions (kill_leader 35 %, kill_follower 20 %,
+                suspend_leader 15 %, suspend_follower 15 %, kill_two 15 %),
+                durations 2-8 s, gaps 3-8 s, and a `pick` in [0, 1). "leader" is
+                whoever leads when the fault fires.
+- Alternatives: fix node names in the schedule ("kill n2 at 30 s"); random
+                overlapping faults; a deterministic simulator.
+- Why:          "Kill n2" would often kill a follower when the point was to
+                kill the leader. Overlapping random faults lose the majority
+                most of the time and test little but timeouts; kill_two does
+                that deliberately and briefly. A deterministic simulator would
+                make runs replayable, but it would not be the real gRPC +
+                threads + fsync system, and that's the thing under test.
+- Viva Q:       "If a run fails, can you reproduce it with the seed?"
+- Answer:       The seed reproduces the schedule. It does not reproduce the
+                interleaving, because thread and election timing aren't
+                deterministic. So every run keeps its history, its dumps and
+                every node's log, and a failure is analysed from those.
+
+### T10. The checker: eight properties, pure functions, evidence per violation
+- Chose:        `checker/properties.py`, `check_all(history, dumps, leaders)`.
+                Every property reports PASS/FAIL, a `checked` count, and one
+                evidence line per violation. `python -m checker <run dir>`.
+                Leader sightings come from status polls AND node logs.
+- Alternatives: assertions inside the chaos script; a linearizability checker
+                (Knossos/Porcupine style) over the whole history.
+- Why:          Separate and pure means it can be tested on deliberately
+                broken inputs (one test per property) and re-run on any old
+                run directory. A full linearizability check is the stronger
+                tool, but for this state machine the specific properties
+                (strictly increasing bids, winner = max, exactly once,
+                rejection reasons that match the final state) are what the
+                problem statement asks for, and each one can be explained in a
+                sentence. Logs plus polls because each misses what the other
+                sees (a sub-50 ms leader; a log line lost to kill -9).
+- Paper:        Figure 3 (Election Safety), §8 (exactly-once).
+- Viva Q:       "How do you know your checker can fail?"
+- Answer:       `tests/test_checker.py` feeds it one broken input per
+                property (a missing bid, a duplicate, a diverged field, a bid
+                after close, a rejected bid that is present, two leaders in
+                one term) and checks it fails that property with evidence
+                naming the culprit.
+
+### T11. "No bid after close" is also checked against the client's start time
+- Chose:        An ok bid whose client-side start (wall clock) is after
+                `close_time` is a violation.
+- Alternatives: check only stamps in the state (`time <= close_time`).
+- Why:          The stamp check only tests that `apply()` compared correctly.
+                The history check tests that the stamp itself is not earlier
+                than reality. The server stamps after the client started, on
+                the same clock, so a correct stamp is >= start. Valid only
+                because clients and servers share one machine's clock
+                (testing-and-chaos.md, Known gaps item 4).
+- Viva Q:       "Couldn't a server stamp a bid in the past and win after close?"
+- Answer:       That is exactly what the history check catches. If a bid the
+                client started after close_time was accepted, its stamp must
+                have been earlier than the real time.
+
+### T12. Chaos clients give up after 6 s, not 30 s
+- Chose:        `scripts/chaos.py --give-up 6` (default), below the longest
+                outage (8 s).
+- Alternatives: the client default, 30 s.
+- Why:          The 45 s smoke run with 30 s had zero unknown outcomes, so
+                `unknown-outcome-at-most-once` passed with `checked 0`, which
+                is vacuous. Giving up during a majority-loss episode produces
+                real unknowns, some of which commit later (the entry was in
+                the log) and some never.
+- Viva Q:       "Why make the clients worse on purpose?"
+- Answer:       To create the hard case. An unknown outcome is the one where
+                exactly-once can go wrong: the client never learned, and the
+                entry may still commit. A test that never produces one doesn't
+                test it.
+
+### T13. End of run: heal, wait for the last close, wait for quiet, dump at one index
+- Chose:        Stop the workload (in-flight retries finish), heal every node,
+                sleep until the last auction's close time + 2 s, wait for
+                `quiet()` (all up, one leader, same commitIndex, applied =
+                committed, digests agree, held for 1 s), then dump all three,
+                retrying until they share one `digest_index`.
+- Alternatives: dump immediately after the workload stops.
+- Why:          The checker compares FINAL states. Dumps taken while a node
+                is still catching up, or while the closer is still closing,
+                would differ for a harmless reason, and the checker would
+                rightly fail them. Waiting for the closes also checks that
+                every auction closes after chaos.
+- Viva Q:       "Isn't waiting for agreement cheating? You only check when
+                they already agree."
+- Answer:       No. Waiting bounds liveness, and the checker still checks
+                safety. If the nodes never converged, `quiet()` times out, the
+                run is marked not quiet, and the exit code is non-zero. If they
+                converged to the wrong state, the properties fail.
+
+### T14. Stress method: bids on the client's own auction; failover = kill -> LEADER, and kill -> first ack
+- Chose:        `scripts/stress.py`. Throughput: N clients, each bidding back
+                to back on its OWN auction (every bid accepted, every bid a
+                real replicated write), no LLM, 1 s warm-up discarded,
+                latency from the client's monotonic clock. Failover: kill -9
+                the leader of a quiet cluster; `t_elect` = until another node
+                reports LEADER in a higher term (polled every 10 ms);
+                `t_write` = until the continuous writer's first acknowledged
+                write. Three election-timeout configs, at least 20 kills each.
+- Alternatives: all clients on one auction (measures rejections, not
+                commits); the paper's exact method (crash at a uniformly random
+                point within the heartbeat interval; we kill whenever the
+                cluster is quiet, which is equivalent: our kill time is
+                independent of the heartbeat phase).
+- Why:          Own auctions make every write the same work (propose, fsync
+                on the leader, AppendEntries, fsync on a follower, apply), so
+                the number means "replicated writes per second". `t_write`
+                includes the client's own backoff, because that's what a user
+                waits. Both are reported so the election and the client can
+                be told apart.
+                Two bugs found while measuring, both mine, both fixed before
+                the reported run: (1) waiting for `quiet()` before each kill
+                skipped every kill, because three identical digests never show
+                at one poll while a writer is committing. Now it waits for
+                `settled()`: all up, one agreed leader, every node within 50
+                entries. (2) `t_write` once read "2 ms": the first ack after
+                t0 had come from the OLD leader, in the instant before
+                TerminateProcess landed. Now only an ack from another node counts.
+- Paper:        §9.3, Figure 16.
+- Viva Q:       "Your failover is slower than the paper's 287 ms median. Why?"
+- Answer:       Our default election timeout is 0.5-1.0 s, not 150-300 ms
+                (E1: Python on Windows can stall for tens of ms). Downtime is
+                about the timeout. With the paper's 150-300 ms we measured
+                the numbers in stress-results.md.
+
+### T15. Not fixed here: a resumed follower deposes a healthy leader
+- Chose:        Document it (testing-and-chaos.md, Known gaps item 1). Do not
+                change `raft/` in this chunk.
+- Alternatives: implement §6's rule (ignore RequestVote within the minimum
+                election timeout of hearing from a leader), or PreVote.
+- Why:          It's a liveness cost (one extra election, ~0.5-1 s), never
+                a safety violation, and Figure 2 doesn't include the
+                mitigation. The chunk's instruction is to not change raft/
+                logic. Changing election rules is its own chunk with its own
+                tests (e.g. that the §6 rule doesn't block a legitimate
+                election after a real leader crash).
+- Paper:        §6: "if a server receives a RequestVote RPC within the
+                minimum election timeout of hearing from a current leader, it
+                does not update its term or grant its vote."
+- Viva Q:       "Your chaos run shows a leader change right after a follower
+                comes back. Bug?"
+- Answer:       No. The follower's timer expired while it was frozen, so it
+                campaigned with a higher term, and Figure 2 makes the leader
+                step down for any higher term. §6's rule would stop that. It's
+                a known liveness gap, logged as T15.
+
+### T16. The status RPC must not throttle the node: cheap cache check, recompute at most every 0.5 s
+- Chose:        `StatusServicer._current()` first compares the cached index
+                with `StateMachine.last_index()` (a lock and an int, no
+                copy). If the index moved, it recomputes only if 0.5 s have
+                passed since the last computation, and otherwise returns the
+                older digest labelled with its own `digest_index`.
+                `DumpState` always computes fresh.
+- Alternatives: the first version: deep-copy the state on every poll
+                (before even checking the cache), recompute whenever the index
+                moved; an incremental digest maintained in apply_fn; copy
+                without the state-machine lock.
+- Why:          Found by measurement. In the failover stress run the poller
+                hit each node every 10 ms while one auction grew to ~18 000
+                bids. Each poll deep-copied that under the state-machine lock,
+                the applier queued behind it, commits fell to about one every
+                0.4 s (visible in n3.log: `appended 17942`, `17943`, ... ~0.4 s
+                apart), and status calls exceeded their 0.2 s timeout, so
+                `settled()` saw nodes as down. The observer was throttling the
+                system. An incremental digest would put more code in apply_fn
+                (rejected in T3). Copying without the lock could copy a
+                half-applied command.
+- Second round: the throttle was not enough. The re-run stalled again
+                around kill 15. Measured: one snapshot at 1 000 / 5 000 / 25 000
+                bids holds the lock 7 / 33 / 190 ms, plus 1 / 6 / 46 ms of JSON.
+                Commits on the leader decayed from ~3 800/min to 28/min as one
+                auction grew. So the digest is now OPT-IN per request
+                (`NodeStatusRequest.include_digest`). The failover poller only
+                needs roles, terms and indexes and never asks; the dashboard
+                and chaos monitor ask and get the throttled digest. The stress
+                writer also starts a new auction every 1 000 bids, because
+                M1's `apply()` scans an auction's whole bid list per PlaceBid
+                (2.85 ms at 25 000 bids) and a long run would otherwise measure
+                that scan, not Raft. That scan is M1 code, left as is (Known
+                gaps).
+- Consequence:  the 10-minute chaos run was made with the FIRST version, so
+                its latency figures are pessimistic. Its correctness results
+                do not depend on it. It was re-run with this version (see
+                testing-and-chaos.md §6).
+- Viva Q:       "Your dashboard shows a digest_index behind lastApplied on a
+                busy node. Is it broken?"
+- Answer:       No, it's throttled on purpose. The digest is recomputed at
+                most twice a second, and it carries the index of the state it
+                covers. An older state, correctly labelled, is never a wrong
+                one.
+
+### T17. Bug found, not fixed: a transient Windows PermissionError on `os.replace` fail-stops FileStorage
+- Chose:        Pin it with a strict xfail
+                (`tests/test_storage_transient_replace.py`) and a test of
+                today's behaviour. Report it. Do not change `raft/` in this
+                chunk.
+- What:         failover stress, 0.15-0.3 s config, n3.log 22:49:26:
+                `os.replace(tmp, state.json)` raised `PermissionError [WinError
+                5] Access is denied` during a step-down. P10 then refuses all
+                further writes, so n3 never changed term again: dead with a
+                healthy disk.
+- Why it happens (inference): Windows refuses to replace a file another
+                process has open at that instant (antivirus, search indexer).
+                It's transient. With 0.15 s timeouts the term file is rewritten
+                hundreds of times, so the window gets hit. Which process held
+                it was not logged.
+- Safety:       intact. The write raised, so the node never acted on an
+                undurable term or vote (P8, P10). Only availability is lost.
+- Fix (later):  retry `os.replace` a few times on `PermissionError` (Windows),
+                and fail-stop only if it persists. The xfail states that.
+- Viva Q:       "Your storage gave up on a healthy disk. Isn't fail-stop
+                wrong?"
+- Answer:       Fail-stop is right for a real write failure: carrying on
+                could ack an undurable vote. What's wrong is classifying a
+                transient Windows sharing violation as a real failure. That
+                needs a bounded retry first. It's pinned by a strict xfail
+                and not fixed here, because this chunk doesn't change raft/.
+
+### T18. Client-observed failover (~2.2 s) is Windows' connect-refused delay, reported, not tuned
+- Finding:      `t_write` was ~2.2 s in every config, whether the election
+                took 0.45 s or 1.1 s. Cause, measured: on Windows a TCP connect
+                to a localhost port with no listener is refused only after
+                2.0 s (the OS retries the SYN after the RST; WSAECONNREFUSED
+                10061 after 2.02-2.03 s, raw socket and first gRPC call alike;
+                later calls on that channel fail at once). After a kill, the
+                client's next attempt goes to the remembered leader:
+                `target = self._target` (client/auction_client.py:139), the
+                last node that answered (line 145), now dead. The attempt
+                (line 144 -> GrpcInvoker, line 89) waits out those 2.0 s;
+                the 8 s per-attempt deadline (line 59) never binds; then one
+                0.05 s backoff (line 164) and the next node, which by then
+                leads. 2.0 + 0.05 + one commit ≈ 2.2 s.
+- Chose:        Report election time (`t_elect`) and client-observed failover
+                (`t_write`) separately, and do not tune the client.
+- Alternatives: a gRPC connect timeout channel option or a short per-attempt
+                deadline (would also cut off healthy slow attempts, such as a
+                CreateAuction waiting on the LLM, and changes client behaviour
+                everywhere for a benchmark); skip the remembered node after an
+                error (it's the right first guess in the common case); retry
+                in parallel on all nodes (breaks one-attempt-at-a-time, A18).
+- Why:          None of these is trivially justified, and the measurement is
+                more honest as it is: this is what a user on this machine
+                waits. On a real network a dead host is often worse (no RST at
+                all, so the attempt runs to its deadline).
+- Paper:        §9.3 measures only the election ("time to detect and replace
+                a crashed leader"), which is our `t_elect`.
+- Viva Q:       "Your election takes under a second but clients wait 2.2 s.
+                Where does the rest go?"
+- Answer:       Into Windows refusing the TCP connect to the dead leader's
+                port, which takes 2 seconds on this OS. Raft had a new leader
+                long before. The client's first retry goes to the node it
+                last talked to, and that's the dead one.
