@@ -41,7 +41,7 @@ def test_status_and_dump_over_the_peer_port(grpc_cluster):  # noqa: F811
         assert seller.place_bid(1, 100).result.success
 
         def statuses():
-            return {nid: stub.GetNodeStatus(status_pb2.NodeStatusRequest(), timeout=2)
+            return {nid: stub.GetNodeStatus(status_pb2.NodeStatusRequest(include_digest=True), timeout=2)
                     for nid, (_, stub) in stubs.items()}
 
         # Every node catches up: same digest_index, same digest.
@@ -76,10 +76,124 @@ def test_status_of_a_lone_node_with_no_leader(grpc_cluster):  # noqa: F811
     c.boot("n2")  # its peers never come up: it can never win
     channel, stub = status_stub(c, "n2")
     try:
-        s = stub.GetNodeStatus(status_pb2.NodeStatusRequest(), timeout=2)
+        s = stub.GetNodeStatus(status_pb2.NodeStatusRequest(include_digest=True), timeout=2)
         assert s.role in ("FOLLOWER", "CANDIDATE")
         assert s.leader_id == ""
         assert (s.commit_index, s.last_applied, s.digest_index) == (0, 0, 0)
         assert len(s.state_digest) == 64  # the empty state has a digest too
     finally:
         channel.close()
+
+
+# --- cost: the status RPC must not throttle the node it observes ---------------
+#
+# Found in the failover stress run: every GetNodeStatus deep-copied the whole
+# state under the state-machine lock (and recomputed the digest whenever the
+# index had moved). Polled every 10 ms against ~18 000 bids, that blocked the
+# applier: commits fell to one every ~0.4 s and status calls timed out.
+
+
+class FakeRaft:
+    node_id = "n1"
+
+    def status(self):
+        from raft.node import NodeStatus, Role
+        return NodeStatus("n1", 1, Role.LEADER, "n1", "n1", 0, 0, 0, 0)
+
+
+def fed_state_machine(n):
+    from auction.state import CreateAuction, PlaceBid
+    from replication import codec
+    from replication.state_machine import StateMachine
+    import datetime as _dt
+    t = _dt.datetime(2030, 1, 1, tzinfo=_dt.timezone.utc)
+    sm = StateMachine()
+    sm.apply_fn(1, codec.encode(CreateAuction(1, "x", t + _dt.timedelta(days=1), "o", "")))
+    for i in range(2, n + 2):
+        sm.apply_fn(i, codec.encode(PlaceBid(1, "b", i, t)))
+    return sm
+
+
+class CountingSM:
+    """Wraps a StateMachine and counts full snapshots."""
+
+    def __init__(self, sm):
+        self.sm, self.snapshots = sm, 0
+
+    def indexed_snapshot(self):
+        self.snapshots += 1
+        return self.sm.indexed_snapshot()
+
+    def last_index(self):
+        return self.sm.last_index()
+
+
+def test_an_idle_node_is_not_copied_on_every_poll():
+    from server.status_servicer import StatusServicer
+    sm = CountingSM(fed_state_machine(10))
+    svc = StatusServicer(FakeRaft(), sm)
+    for _ in range(20):
+        svc.GetNodeStatus(None, None)
+    assert sm.snapshots == 1
+
+
+def test_a_busy_node_recomputes_the_digest_at_most_once_per_interval():
+    from replication import codec
+    from auction.state import PlaceBid
+    from server.status_servicer import StatusServicer
+    import datetime as _dt
+    now = [100.0]
+    sm = CountingSM(fed_state_machine(10))
+    svc = StatusServicer(FakeRaft(), sm, min_interval=0.5, clock=lambda: now[0])
+    first = svc.GetNodeStatus(None, None)
+    t = _dt.datetime(2030, 1, 1, tzinfo=_dt.timezone.utc)
+    for i in range(20, 40):  # the index moves on every poll
+        sm.sm.apply_fn(i, codec.encode(PlaceBid(1, "b", 1000 + i, t)))
+        now[0] += 0.01
+        s = svc.GetNodeStatus(None, None)
+        assert s.digest_index == first.digest_index  # honest label of an older state
+    assert sm.snapshots == 1
+    now[0] += 0.5
+    assert svc.GetNodeStatus(None, None).digest_index == 39
+    assert sm.snapshots == 2
+
+
+def test_dump_state_is_always_fresh():
+    from server.status_servicer import StatusServicer
+    from replication import codec
+    from auction.state import PlaceBid
+    import datetime as _dt
+    now = [0.0]
+    sm = fed_state_machine(3)
+    svc = StatusServicer(FakeRaft(), sm, min_interval=60, clock=lambda: now[0])
+    svc.GetNodeStatus(None, None)
+    sm.apply_fn(50, codec.encode(PlaceBid(1, "b", 999, _dt.datetime(2030, 1, 1, tzinfo=_dt.timezone.utc))))
+    d = svc.DumpState(None, None)
+    assert d.digest_index == 50
+    assert svc.GetNodeStatus(None, None).digest_index == 50  # the fresh dump refreshed the cache
+
+
+def test_last_index_is_cheap_and_matches_indexed_snapshot():
+    sm = fed_state_machine(5)
+    assert sm.last_index() == sm.indexed_snapshot()[0] == 6
+
+
+def test_without_include_digest_no_snapshot_is_taken_at_all():
+    """Second finding of the failover stress run: at 25 000 bids one
+    snapshot holds the state-machine lock ~190 ms. A poller that only needs
+    roles and indexes must not pay that, ever."""
+    from server.status_servicer import StatusServicer
+    sm = CountingSM(fed_state_machine(10))
+    svc = StatusServicer(FakeRaft(), sm)
+    for _ in range(5):
+        s = svc.GetNodeStatus(status_pb2.NodeStatusRequest(include_digest=False), None)
+        assert s.state_digest == "" and s.digest_index == 11
+    assert sm.snapshots == 0
+    assert svc.GetNodeStatus(status_pb2.NodeStatusRequest(include_digest=True), None).state_digest
+    assert sm.snapshots == 1
+
+
+def test_the_poller_can_skip_digests():
+    from harness.status import StatusPoller
+    assert StatusPoller({}, include_digest=False).include_digest is False
+    assert StatusPoller({}).include_digest is True

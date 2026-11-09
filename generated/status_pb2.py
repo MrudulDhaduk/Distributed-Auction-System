@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cstatus.proto\x12\x06status\"\x13\n\x11NodeStatusRequest\"\xe6\x01\n\nNodeStatus\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0c\n\x04role\x18\x02 \x01(\t\x12\x0c\n\x04term\x18\x03 \x01(\x03\x12\x11\n\tleader_id\x18\x04 \x01(\t\x12\x11\n\tvoted_for\x18\x05 \x01(\t\x12\x14\n\x0c\x63ommit_index\x18\x06 \x01(\x03\x12\x14\n\x0clast_applied\x18\x07 \x01(\x03\x12\x16\n\x0elast_log_index\x18\x08 \x01(\x03\x12\x15\n\rlast_log_term\x18\t \x01(\x03\x12\x14\n\x0cstate_digest\x18\n \x01(\t\x12\x14\n\x0c\x64igest_index\x18\x0b \x01(\x03\"\x12\n\x10\x44umpStateRequest\"\\\n\tStateDump\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x14\n\x0c\x64igest_index\x18\x02 \x01(\x03\x12\x14\n\x0cstate_digest\x18\x03 \x01(\t\x12\x12\n\nstate_json\x18\x04 \x01(\t2\x89\x01\n\rStatusService\x12>\n\rGetNodeStatus\x12\x19.status.NodeStatusRequest\x1a\x12.status.NodeStatus\x12\x38\n\tDumpState\x12\x18.status.DumpStateRequest\x1a\x11.status.StateDumpb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cstatus.proto\x12\x06status\"+\n\x11NodeStatusRequest\x12\x16\n\x0einclude_digest\x18\x01 \x01(\x08\"\xe6\x01\n\nNodeStatus\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0c\n\x04role\x18\x02 \x01(\t\x12\x0c\n\x04term\x18\x03 \x01(\x03\x12\x11\n\tleader_id\x18\x04 \x01(\t\x12\x11\n\tvoted_for\x18\x05 \x01(\t\x12\x14\n\x0c\x63ommit_index\x18\x06 \x01(\x03\x12\x14\n\x0clast_applied\x18\x07 \x01(\x03\x12\x16\n\x0elast_log_index\x18\x08 \x01(\x03\x12\x15\n\rlast_log_term\x18\t \x01(\x03\x12\x14\n\x0cstate_digest\x18\n \x01(\t\x12\x14\n\x0c\x64igest_index\x18\x0b \x01(\x03\"\x12\n\x10\x44umpStateRequest\"\\\n\tStateDump\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x14\n\x0c\x64igest_index\x18\x02 \x01(\x03\x12\x14\n\x0cstate_digest\x18\x03 \x01(\t\x12\x12\n\nstate_json\x18\x04 \x01(\t2\x89\x01\n\rStatusService\x12>\n\rGetNodeStatus\x12\x19.status.NodeStatusRequest\x1a\x12.status.NodeStatus\x12\x38\n\tDumpState\x12\x18.status.DumpStateRequest\x1a\x11.status.StateDumpb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,13 +32,13 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'status_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_NODESTATUSREQUEST']._serialized_start=24
-  _globals['_NODESTATUSREQUEST']._serialized_end=43
-  _globals['_NODESTATUS']._serialized_start=46
-  _globals['_NODESTATUS']._serialized_end=276
-  _globals['_DUMPSTATEREQUEST']._serialized_start=278
-  _globals['_DUMPSTATEREQUEST']._serialized_end=296
-  _globals['_STATEDUMP']._serialized_start=298
-  _globals['_STATEDUMP']._serialized_end=390
-  _globals['_STATUSSERVICE']._serialized_start=393
-  _globals['_STATUSSERVICE']._serialized_end=530
+  _globals['_NODESTATUSREQUEST']._serialized_end=67
+  _globals['_NODESTATUS']._serialized_start=70
+  _globals['_NODESTATUS']._serialized_end=300
+  _globals['_DUMPSTATEREQUEST']._serialized_start=302
+  _globals['_DUMPSTATEREQUEST']._serialized_end=320
+  _globals['_STATEDUMP']._serialized_start=322
+  _globals['_STATEDUMP']._serialized_end=414
+  _globals['_STATUSSERVICE']._serialized_start=417
+  _globals['_STATUSSERVICE']._serialized_end=554
 # @@protoc_insertion_point(module_scope)

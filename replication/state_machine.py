@@ -158,6 +158,11 @@ class StateMachine:
         """A deep copy of all replicated state, for comparing nodes."""
         return self.indexed_snapshot()[1]
 
+    def last_index(self) -> int:
+        """The index of the last command apply_fn saw. Cheap: no copy."""
+        with self._lock:
+            return self._last_index
+
     def indexed_snapshot(self) -> tuple:
         """(index, snapshot), taken together under self._lock, so the index
         is exactly the last command folded into that snapshot."""

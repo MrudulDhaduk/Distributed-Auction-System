@@ -92,16 +92,20 @@ def events(prev: dict, cur: dict) -> list:
 
 
 class StatusPoller:
-    def __init__(self, addrs: dict, timeout: float = POLL_TIMEOUT):
+    def __init__(self, addrs: dict, timeout: float = POLL_TIMEOUT, include_digest: bool = True):
+        """include_digest=False: roles, terms and indexes only, no state
+        digest (cheap for the node; see proto/status.proto)."""
         self.addrs = dict(addrs)
         self._timeout = timeout
+        self.include_digest = include_digest
         self._channels = {n: grpc.insecure_channel(a) for n, a in self.addrs.items()}
         self._stubs = {n: status_pb2_grpc.StatusServiceStub(c) for n, c in self._channels.items()}
-        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=len(addrs), thread_name_prefix="status")
+        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(addrs)), thread_name_prefix="status")
 
     def _one(self, node):
         try:
-            return Status.from_proto(self._stubs[node].GetNodeStatus(status_pb2.NodeStatusRequest(), timeout=self._timeout))
+            return Status.from_proto(self._stubs[node].GetNodeStatus(
+                status_pb2.NodeStatusRequest(include_digest=self.include_digest), timeout=self._timeout))
         except grpc.RpcError:
             return None
 

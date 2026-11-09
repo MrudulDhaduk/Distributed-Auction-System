@@ -20,7 +20,13 @@ service StatusService {
   rpc DumpState(DumpStateRequest) returns (StateDump);
 }
 
-message NodeStatusRequest {}
+message NodeStatusRequest {
+  // The digest costs a deep copy of the whole state under the state-machine
+  // lock (~190 ms at 25 000 bids, docs/decisions.md T16). Callers that only
+  // need roles, terms and indexes leave this false and pay nothing; then
+  // state_digest is "" and digest_index is the last applied command index.
+  bool include_digest = 1;
+}
 
 message NodeStatus {
   string node_id = 1;
