@@ -224,3 +224,6 @@ papers/
 
 # Raft node data directories (run_node --data-dir data/n1 ...)
 data/
+
+# Chaos / stress / demo run output (scripts/chaos.py, stress.py, demo.py)
+runs/
