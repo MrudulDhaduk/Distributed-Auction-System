@@ -88,6 +88,10 @@ or pass `-NoLLM`:
 .\scripts\run_cluster.ps1 -NoLLM
 ```
 
+If your `data\` directory was written before the `time_conv` fix
+(docs/decisions.md, T1), wipe it first: `Remove-Item -Recurse data`. Those
+logs hold times truncated by the old float conversion (dev data only).
+
 Each node logs its role changes, e.g.
 
 ```

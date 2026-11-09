@@ -1662,3 +1662,48 @@ each part of that file.
 - Answer:       UNAVAILABLE after the read timeout, never the old data. The
                 client moves on to another node, finds the new leader, and
                 reads there.
+
+---
+
+## Testing and chaos
+
+Code: `common/time_conv.py` (T1), `proto/status.proto`, `server/status_servicer.py`,
+`checker/`, `scripts/dashboard.py`, `scripts/chaos.py`, `scripts/demo.ps1`.
+Walkthrough: [testing-and-chaos.md](testing-and-chaos.md). Known gaps: the
+end of that file.
+
+### T1. `time_conv`: exact integer arithmetic, no float (fixes an M1 bug)
+- Chose:        `dt_to_micros(dt) = (dt - EPOCH) // timedelta(microseconds=1)`
+                and `micros_to_dt(n) = EPOCH + timedelta(microseconds=n)`.
+                The strict-xfail codec test became a normal passing test, and
+                `tests/test_time_conv.py` round-trips 200 000 seeded random
+                values (1900-2200) both ways.
+- Alternatives: keep the float and `round()` instead of `int()` (fixes the
+                pinned value, but a double still has only 53 bits of mantissa,
+                and epoch micros already use 51; it is "probably right", not
+                exact); store `google.protobuf.Timestamp` (seconds + nanos,
+                exact, but a second time representation next to the int64 the
+                whole proto design uses); leave the bug (determinism was never
+                broken, see below).
+- Why:          `timedelta` stores days, seconds and microseconds as integers,
+                and `timedelta // timedelta` is integer division, so no value
+                is ever rounded. The old code was not a divergence bug: the
+                leader encodes once and every node, the leader included,
+                applies the DECODED bytes, so all replicas agreed on the same
+                wrong microsecond. But it was a correctness bug at the wire
+                boundary: a bid stamped one microsecond AFTER `close_time`
+                could be truncated to exactly `close_time` and accepted,
+                because `curr_time > close_time` is a microsecond comparison.
+- Data:         a `data\<id>` directory written BEFORE this commit holds
+                times that were truncated by the old code. They still decode,
+                and every node decodes them the same way, but they can be one
+                microsecond off what the user meant. It is dev data only:
+                wipe `data\` (`Remove-Item -Recurse data`) after pulling this.
+- Paper:        none (wire format); CLAUDE.md "apply() must be deterministic".
+- Viva Q:       "Your M1 time conversion was wrong. Did that ever make two
+                replicas disagree?"
+- Answer:       No. Only the leader converts a datetime to micros, once, and
+                every node applies the decoded value, so they all agreed on
+                the same truncated time. The bug lost a microsecond against
+                what the user saw, not between replicas. Now it is exact
+                integer arithmetic, tested on 200 000 random values.
