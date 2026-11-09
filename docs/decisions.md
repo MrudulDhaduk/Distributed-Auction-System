@@ -877,3 +877,332 @@ These entries use CLAUDE.md's six-field template.
                 node is changed or bypassed, and every message that arrives is
                 exactly what the leader sent. It's an adversarial but legal
                 network, the kind Raft's safety argument already has to cover.
+
+---
+
+## Persistence
+
+Code: `raft/file_storage.py`, `raft/storage.py` (the `Storage` protocol),
+`raft/run_node.py` (`--data-dir`). Walkthrough:
+[raft-persistence.md](raft-persistence.md). Known gaps: section 7 of that file.
+
+### P1. FileStorage wraps a MemoryStorage: disk first, then the in-memory copy
+- Chose:        `FileStorage` keeps a `MemoryStorage` (`self._mem`). Each write
+                method writes and fsyncs the file, and only then makes the same
+                call on `_mem`. Every read is answered by `_mem`. The whole log
+                stays in memory.
+- Alternatives: read entries back from the file on demand (seek by offset); write
+                the reads a second time in FileStorage; a shared base class.
+- Why:          The node must not be able to tell the two storages apart. Reusing
+                MemoryStorage makes the reads identical by construction, not by
+                keeping two copies of the code in step. Disk-first ordering means
+                the copy never holds anything that isn't durable: if the fsync
+                raises, `_mem` is untouched. Holding the log in memory costs RAM
+                but makes `term_at` (called on every AppendEntries) free. With no
+                snapshots (P11) the log is replayed from memory anyway.
+- Paper:        Figure 2, State.
+- Viva Q:       "Your reads come from memory. How do you know memory matches disk?"
+- Answer:       Memory changes only after the disk write and its fsync return, by
+                the same call. On open, memory is built *from* the disk. And
+                `test_file_storage_behaves_exactly_like_memory_storage` runs the
+                same operations on both and compares every read.
+
+### P2. Two files: `state.json` for term+vote, `log.bin` for entries
+- Chose:        currentTerm and votedFor in one small file, replaced whole. The
+                log in a separate append-only file.
+- Alternatives: one file holding everything; a database (SQLite); a separate file
+                for each of term and vote.
+- Why:          They change differently. The term and vote change rarely and are
+                tiny, so rewriting them whole is cheap and needs no record format.
+                The log grows, so it must be appended to, never rewritten. Term
+                and vote are in *one* file because a vote only means something
+                with the term it was cast in (R5): two files would leave a crash
+                window with a new term and an old vote. No SQLite, so the
+                durability argument is ours to make and defend line by line.
+- Paper:        Figure 2 ("votedFor: candidateId that received vote in current term").
+- Viva Q:       "Why not write the term and the vote separately?"
+- Answer:       Say the term is written, then we crash before the vote. On reboot
+                the old vote would sit next to the new term, and look like a vote
+                cast in a term we never voted in. One file, replaced atomically,
+                means the pair is always old-and-old or new-and-new.
+
+### P3. Atomic replace with `os.replace`; no directory fsync on Windows
+- Chose:        write `state.json.tmp`, `flush()`, `os.fsync()`, `os.replace()`
+                over `state.json`. On POSIX also fsync the directory
+                (`_fsync_dir`). On Windows, skip the directory fsync, because it
+                can't be done: `os.open` on a directory raises `PermissionError`
+                (measured on this machine).
+- Alternatives: `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`
+                via ctypes; two "slot" files overwritten in place with a sequence
+                number and a checksum (no rename at all); overwrite `state.json`
+                in place.
+- Why:          Overwriting in place can tear: half old, half new. A rename
+                can't. After `os.replace` returns, every process on the machine
+                sees the new file, so a **process crash** (the failure we test and
+                demo) is fully covered. What isn't covered on Windows is a
+                **power loss or OS crash** right after the rename: NTFS keeps the
+                directory consistent but can come back with the *old* file. That
+                is a real gap (walkthrough gap 1). I logged rather than fixed it
+                because the brief said `os.replace`, and the ctypes alternative's
+                documented guarantee is worded around cross-volume moves (I'm not
+                sure it covers a same-volume rename).
+- Paper:        Figure 2 ("Updated on stable storage").
+- Viva Q:       "Is your vote durable if the power fails right after you reply?"
+- Answer:       The *contents* are: they were fsync'd before the rename. The
+                *rename* might not be on Windows, because Python can't fsync a
+                directory there. After a process crash it's always there. For
+                power loss I'd switch to MOVEFILE_WRITE_THROUGH or two in-place
+                slots. It's listed as a known gap.
+
+### P4. Log record: length, checksum of the length, checksum of the payload
+- Chose:        `[length u32][crc32(length) u32][crc32(payload) u32][term u64,
+                kind u8, data]`, big-endian, `zlib.crc32`. Kind 1 = COMMAND,
+                2 = NOOP (0 is unused). No file header or version number.
+- Alternatives: one checksum over the whole record; length-only framing; newline
+                -delimited JSON; a file header with a magic number and version.
+- Why:          The length must be trusted before the payload can even be found,
+                so it gets its own checksum. Otherwise a flipped bit in a *middle*
+                record's length could point past EOF, look like a torn tail, and
+                silently drop every record after it. CRC32 catches every burst
+                error shorter than 32 bits, which is plenty for detecting torn or
+                damaged writes. It's not meant to stop a deliberate forger. JSON
+                lines would need escaping for arbitrary bytes (the payload is
+                opaque, R1). Kind 0 unused means zero-filled space never decodes
+                as an entry. I skipped a version header to keep the
+                torn-tail rules about records only; changing the format later
+                would need one.
+- Paper:        none (an engineering choice under Figure 2).
+- Viva Q:       "What if the length field itself is corrupted?"
+- Answer:       Its own checksum fails, and we stop with CorruptStorageError. We
+                never follow a length we haven't verified. Tested by flipping a
+                length byte in the first of three records.
+
+### P5. `state.json` is plain JSON with no checksum
+- Chose:        `{"term": 3, "voted_for": "n2"}`. A parse failure or a wrong type
+                means corrupt, and the node refuses to start.
+- Alternatives: a binary struct with a CRC, like the log.
+- Why:          Atomic replace (P3) means the file is never half-written, so the
+                main reason for a checksum is gone. JSON can be read in an editor
+                during the viva and the demo. A truncated or edited file fails to
+                parse (tested). A file that is wrong but still well-formed (say, a
+                hand-edited term) wouldn't be caught. I accept that, since it's
+                outside the crash model.
+- Paper:        —
+- Viva Q:       "Why does the log have checksums but the state file doesn't?"
+- Answer:       The log is appended to in place, so a crash can leave half a
+                record. The state file is only ever swapped whole by a rename, so
+                a crash leaves the old one or the new one.
+
+### P6. Torn tail: what a crash in the last append can leave, cut off on open
+- Chose:        After the last good record, these count as torn: fewer bytes than
+                a header; only zero bytes; a payload that runs past EOF; a
+                checksum-failing **last** record. Torn bytes are truncated off the
+                file and fsync'd *on open*, before any new append. A partially
+                written batch keeps its complete leading records.
+- Alternatives: discard the whole last batch (that would need batch markers);
+                leave the garbage in place and just skip it; refuse to start on
+                any damage.
+- Why:          The torn write's `append` never returned, so nothing after it
+                ran: no reply, no counting. Nobody was told this node holds that
+                entry, which makes dropping it the same as an AppendEntries that
+                never arrived (§5.5: the leader retries). Truncating on open is
+                essential: otherwise the next append lands after the garbage, and
+                the next open sees it in the *middle* and refuses. Keeping the
+                complete prefix of a batch is safe for the same reason as
+                accepting a shorter AppendEntries: they're the leader's entries,
+                in order. The zero rule covers NTFS after a power cut (size grew,
+                data didn't land). We never write an all-zero header.
+- Paper:        §5.5 ("If a server crashes after completing an RPC but before
+                responding, then it will receive the same RPC again after it
+                restarts. Raft RPCs are idempotent").
+- Viva Q:       "You threw away an entry from the log. Couldn't it be committed?"
+- Answer:       Only entries this node acknowledged could count toward a commit.
+                An acknowledgement is sent only after `append` returns, which is
+                after the fsync. The torn record's append never returned, so it
+                was never acknowledged and never counted.
+
+### P7. Damage anywhere except the tail is a hard error
+- Chose:        A bad header checksum (anywhere), or a bad payload with more
+                records after it, raises `CorruptStorageError`. `run_node` exits.
+                The same goes for a log without a state file, decreasing terms,
+                or an entry's term above currentTerm. All checks run before the
+                tail is truncated, so a refused directory is left untouched.
+- Alternatives: skip the bad record and carry on; truncate everything from the bad
+                record on; rebuild from the leader by starting empty.
+- Why:          A record in the middle was followed by later appends, so its own
+                append *returned*, and the entry may have been acknowledged and
+                counted toward a commit. Skipping or truncating it silently makes
+                this node a copy that's missing a committed entry: Leader
+                Completeness can then fail, and it fails without anyone noticing.
+                Starting empty is the forgotten-vote bug (walkthrough gap 6). A
+                node that won't start costs availability, which a majority
+                tolerates. A node that lies about its log costs safety, which
+                nothing tolerates.
+- Paper:        Figure 3 (Leader Completeness); §5.4.
+- Viva Q:       "Why not just skip the bad record?"
+- Answer:       Because this node may have acknowledged it. If that ack helped
+                commit the entry, a log without it could later win an election and
+                overwrite a committed entry. Refusing to start turns a silent
+                safety bug into a loud availability problem.
+
+### P8. fsync every write, synchronously, under the node lock
+- Chose:        Each write method fsyncs before returning, and the node calls them
+                while holding its lock. No batching across RPCs (no group commit),
+                no background flusher.
+- Alternatives: release the lock while fsyncing; group commit; an async log writer
+                that holds back replies until the flush finishes.
+- Why:          This makes "durable before responding" true just by the order of
+                the code: write, fsync, then build the reply, all in one critical
+                section (walkthrough §4). Every alternative needs a second
+                mechanism to stop replies until a later flush, and that's where
+                bugs live. The cost is measured: about 0.25 ms per append fsync and
+                1.2 ms per state replace on this machine, against 100 ms
+                heartbeats (30 ms in tests). Heartbeats with no entries and no term
+                change write nothing at all.
+- Paper:        Figure 2; §5.6 ("Raft's RPCs typically require the recipient to
+                persist information to stable storage, so the broadcast time may
+                range from 0.5ms to 20ms").
+- Viva Q:       "You hold a lock during disk I/O. Isn't that slow?"
+- Answer:       It's a quarter of a millisecond here, and the paper already
+                expects persistence in the broadcast time. Doing it under the lock
+                is what makes the durable-before-reply argument three lines long.
+                Group commit would be the next step if throughput mattered.
+
+### P9. The leader's own append is durable before it counts itself
+- Chose:        `propose()` and the no-op call `storage.append` (fsync'd) and only
+                then `_advance_commit()`, which counts the leader as one copy. This
+                is sequential, not parallel to sending.
+- Alternatives: send AppendEntries first and write the leader's disk in parallel,
+                counting the leader only once its write finishes (the thesis
+                optimisation).
+- Why:          A commit means a majority of *durable* copies. If the leader counted
+                a copy that was only in memory, power loss on the leader could
+                leave fewer than a majority of real copies of an entry a client
+                was told is APPLIED. The walkthrough §4 has the three-node trace.
+                The parallel version is safe too, but it's a later optimisation,
+                and the sequential one needed no change to node.py.
+- Paper:        §5.3 ("A log entry is committed once the leader that created the
+                entry has replicated it on a majority of the servers").
+- Viva Q:       "Does the leader have to wait for its own disk?"
+- Answer:       It has to wait before it *counts itself*, because otherwise
+                "majority" includes a copy that a crash can erase. It doesn't
+                strictly have to wait before *sending*, but we keep it simple and
+                do both in order.
+
+### P10. A failed write fails the storage stop
+- Chose:        If any write raises, the error propagates (so the handler sends no
+                reply). The storage records the failure, and every later write
+                raises `StorageFailedError` until the process restarts. Reads keep
+                working.
+- Alternatives: retry the write; ignore the error; crash the process.
+- Why:          After a failed write the file's tail is unknown: some, all, or
+                none of the bytes may be there. Appending after it could put good
+                records behind garbage, and a later open would call that
+                corruption (P7). Retrying an fsync after it fails is known to be
+                unreliable (the OS may have dropped the dirty pages). Restarting
+                re-reads the file and applies the torn-tail rules, which is the
+                path we've tested. I didn't kill the whole process because that
+                would also take down the auction server sharing it.
+- Paper:        —
+- Viva Q:       "The disk fills up mid-append. What happens?"
+- Answer:       The append raises, so no reply is sent and nobody counts that
+                entry. The node then refuses every write: it can't vote or accept
+                entries, and the rest of the cluster carries on without it. A
+                restart repairs the tail.
+
+### P11. Restart replays the log; nothing volatile is saved; no snapshots
+- Chose:        commitIndex, lastApplied and the state machine all start empty on
+                boot. The node re-applies from index 1 once a leader tells it the
+                commitIndex. No snapshots.
+- Alternatives: save lastApplied plus a state-machine snapshot together
+                (§7 snapshots); save only commitIndex.
+- Why:          Figure 2 puts commitIndex and lastApplied in the *volatile* box,
+                and the deterministic `apply()` (CLAUDE.md) means replaying the
+                same log rebuilds the same state. The only rule: lastApplied and
+                the state machine must be lost or kept *together*. Losing one
+                without the other either double-applies or skips entries. Saving
+                commitIndex isn't needed: a leader re-establishes it, and the no-op
+                gets it moving after a full restart. Snapshots are §7, out of
+                scope.
+- Paper:        Figure 2 ("Volatile state on all servers"); §7 (log "takes more
+                time to replay").
+- Viva Q:       "After a restart, won't the node apply everything twice?"
+- Answer:       Into an empty state machine, once each, so the result is the same
+                state as before the crash. lastApplied is 0 *because* the state
+                machine is empty. The test checks the re-applied indexes match the
+                ones from before the crash.
+
+### P12. node.py is unchanged in logic; a `Storage` protocol documents the seam
+- Chose:        Add `Storage` (a `typing.Protocol`) to `raft/storage.py`. Change
+                node.py's type hint to it, and fix one docstring line. Nothing else
+                in node.py changed.
+- Alternatives: an abstract base class that both inherit from; leave the hint as
+                `MemoryStorage`.
+- Why:          The seam from R5 already put all seven write sites before their
+                replies, so the algorithm needed nothing. A Protocol names the
+                interface without making MemoryStorage inherit anything, and the
+                old hint was simply wrong.
+- Paper:        —
+- Viva Q:       "What did you have to change in the Raft algorithm for persistence?"
+- Answer:       Nothing. Every write already went through three methods, and every
+                reply was built after them. Making those methods fsync was the
+                whole change.
+
+### P13. Tests: a crash is a second instance; dead nodes are fenced; memory runs are strict xfails
+- Chose:        At the storage level, a crash is opening a second `FileStorage` on
+                the same directory while the first is still open and never closed.
+                At the cluster level, `crash()` drops the node from the network,
+                stops it, then closes its storage while holding the node's lock.
+                The two headline tests are parametrised over MemoryStorage with
+                `xfail(strict=True)`.
+- Alternatives: kill real subprocesses in the unit tests; let the dead node's
+                storage stay open.
+- Why:          A second instance sees only the files, never the first instance's
+                memory, which is exactly what a new process sees. No close means
+                durability can't depend on a clean shutdown. In the cluster, an
+                RPC routed just before the drop can still be inside the dead node's
+                handler. Without the fence it could write through the old handle
+                after the new incarnation opened the file, a thing a real crash
+                can't do. `close()` flushes nothing, so the fence doesn't hide a
+                missing fsync. Strict xfail proves every run that the tests
+                *detect* the bug: if the memory runs ever passed, the suite would
+                go red. Real subprocess kills are in the walkthrough's gRPC trace.
+- Paper:        —
+- Viva Q:       "How do you know your test would catch a missing persistence?"
+- Answer:       It runs both ways. With MemoryStorage it fails, every time, with
+                "voted for n1 AND n2 in term 5" and "x applied nowhere". That's a
+                strict xfail, so if it ever stopped failing, the suite would fail.
+
+### P14. `run_node --data-dir`: optional, one directory per node, refuse on corruption
+- Chose:        `--data-dir DIR` selects FileStorage on DIR (created if missing).
+                Without it the node uses MemoryStorage. On `CorruptStorageError` the
+                runner exits with the message. At start it logs the recovered term,
+                vote and log length. `data/` is gitignored.
+- Alternatives: make a data dir mandatory; derive it from `--id`; one shared
+                directory with a subfolder per node chosen automatically.
+- Why:          Optional keeps every existing script and test working unchanged.
+                Explicit beats derived, because pointing two nodes at one directory
+                is the dangerous mistake (walkthrough gap 3), and an explicit path
+                makes it visible in the command line. The recovered-state log line
+                is what the demo and the trace show.
+- Paper:        —
+- Viva Q:       "What happens if I start a node on a damaged directory?"
+- Answer:       It prints why and exits. It never starts with a log that might be
+                missing something it acknowledged.
+
+### P15. Step-down then grant writes the state file twice
+- Chose:        A RequestVote with a higher term causes two durable writes:
+                `(T, null)` in `_step_down_if_stale`, then `(T, candidate)` when the
+                vote is granted. Left as is.
+- Alternatives: merge them into one write (that changes node.py's logic).
+- Why:          Both writes are correct on their own: each is a consistent
+                (term, vote) pair, and a crash between them leaves "term T, no
+                vote", which is true. The cost is one extra ~1 ms fsync per
+                election per voter. Merging would mean changing the algorithm file
+                for speed, which this chunk was told to avoid.
+- Paper:        Figure 2, All Servers ("If RPC request or response contains term
+                T > currentTerm: set currentTerm = T, convert to follower").
+- Viva Q:       "A crash between the two writes: is that safe?"
+- Answer:       Yes. On reboot the node is in term T and hasn't voted. It never
+                sent "granted", because the reply is built after the second write,
+                so the candidate didn't count it.

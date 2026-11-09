@@ -577,9 +577,11 @@ unused `last_logs` parameter.
    gone**: an acknowledged write is lost. Fix: storage's three write methods
    become durable before returning (the seam is ready, R5). Until then the
    Leader Completeness argument in section 1 assumes nodes don't restart.
+   **Closed in step 6:** this exact scenario is now a test;
+   [raft-persistence.md](raft-persistence.md) §5b.
 2. **`lastApplied` and the state machine aren't durable either (R2).** Step 6
    has to decide between saving them together and replaying the log from 1 at
-   boot.
+   boot. **Decided in step 6: replay** (P11).
 3. **Plain backoff is O(divergence) round trips (R6).** A follower that is far
    behind takes one refused RPC per missing entry just to find the match point.
    It's fine on localhost and slow over a WAN.
