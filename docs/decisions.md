@@ -1206,3 +1206,319 @@ Code: `raft/file_storage.py`, `raft/storage.py` (the `Storage` protocol),
 - Answer:       Yes. On reboot the node is in term T and hasn't voted. It never
                 sent "granted", because the reply is built after the second write,
                 so the candidate didn't count it.
+
+---
+
+## Auction on Raft
+
+Code: `replication/`, `sessions/`, `server/`, `proto/commands.proto`.
+Walkthrough: [auction-on-raft.md](auction-on-raft.md). Known gaps: the end of
+each part of that file.
+
+### A1. Command encoding: one `Command` proto with a oneof, times as epoch micros
+- Chose:        `proto/commands.proto`. `Command { client_id = 1; seq = 2;
+                oneof kind { create_auction = 10; place_bid = 11;
+                close_auction = 12; login = 13; logout = 14; } }`. One message
+                per command type, mirroring the dataclasses field for field.
+                Times are `int64` epoch microseconds through
+                `common/time_conv`. `replication/codec.py` is the only code
+                that knows the form. Field numbers are permanent: removing a
+                field means a `reserved` line, and
+                `test_field_numbers_are_pinned` compares against bytes written
+                out by hand.
+- Alternatives: pickle; JSON; a hand-rolled struct format; one proto message
+                with every field optional and a type tag.
+- Why:          These bytes sit in `log.bin` forever and are decoded again on
+                every restart (P11), possibly by newer code. Pickle is tied to
+                Python class paths, so renaming a class breaks old logs, and
+                it can run code on load. JSON would work, but nothing would
+                check the schema or pin the field numbers. A oneof makes "no
+                command" and "two commands" impossible to express, and
+                `WhichOneof` gives the dispatch. Epoch micros match
+                `auction.proto`, so there is one time representation from the
+                wire to the disk. Starting the oneof at 10 leaves 3..9 for
+                envelope fields.
+- Paper:        Figure 2 ("each entry contains command for state machine");
+                R1 (entries are opaque bytes).
+- Viva Q:       "You add a field to PlaceBid next month. Can a node replay
+                last month's log?"
+- Answer:       Yes. A new field number reads as its default from old bytes,
+                and old field numbers never change meaning. Renumbering is the
+                one thing that would break it, and the pinned-bytes test turns
+                red first.
+
+### A2. `apply_fn` is a `StateMachine` method; undecodable bytes fail-stop
+- Chose:        `StateMachine.apply_fn(index, data)` decodes, dedupes,
+                dispatches (auction commands to the unchanged
+                `AuctionState.apply()`, Login/Logout to `SessionState.apply()`),
+                and returns `Applied`. Every *outcome* is a returned value. The
+                one exception is bytes that don't decode: logged CRITICAL (index
+                + 64 bytes of hex), then raised as `CorruptEntryError`, so the
+                applier halts (R3).
+- Alternatives: log the bad entry and skip it; return a failure `Applied` for
+                it.
+- Why:          The task said "it must not raise: a decode error is a
+                fail-stop, so log it loudly (R3)". I read that as: no outcome
+                raises, and a decode error is the one deliberate stop. Skipping
+                would actually be "the same on every node", since every node
+                holds the same bytes. But a committed entry that doesn't decode
+                can only come from a corrupt log or a code version mismatch.
+                Carrying on would hide that, and the next entry could depend on
+                the skipped one. So stop loudly.
+- Paper:        Figure 2, All Servers (apply log[lastApplied]); R3.
+- Viva Q:       "One entry in the log is garbage. What does the cluster do?"
+- Answer:       Every node reaches the same index, logs CRITICAL and stops
+                applying there. They all hold the same state. Raft itself keeps
+                running (votes, replication), but nothing past that index is
+                applied until someone fixes it.
+
+### A3. Replicated sessions: the leader mints the token, Login/Logout are commands
+- Chose:        `SessionStore.create()` mints `secrets.token_urlsafe(32)` on
+                the leader, then proposes `Login(token, username)`. `destroy()`
+                proposes `Logout(token)`. `validate()` reads the replicated
+                `SessionState` on this node. Same `create/validate/destroy`
+                shape. `create` returns `Applied.token`, which on a dedupe hit
+                is the *first* attempt's token. No TTL.
+- Alternatives: accept re-login after a failover (CLAUDE.md's other option);
+                derive the token deterministically inside `apply()` (for
+                example a hash of index and term); sticky sessions on one node.
+- Why:          Re-login on every failover would break the kill-the-leader
+                demo, and it hides the problem instead of solving it. A token
+                computed inside `apply()` from log data would be guessable by
+                anyone who can guess the index. Randomness must happen *once*,
+                outside, and be replicated as data: the same rule as the LLM
+                text and `curr_time`. Returning `Applied.token` matters. A
+                retried Login mints a new token, but dedupe returns the first
+                response, and only the first token is in the table.
+- Paper:        §8 (dedupe); CLAUDE.md "apply() must be deterministic".
+- Viva Q:       "Where is the randomness in your login, and why isn't that a
+                determinism bug?"
+- Answer:       In `SessionStore.create`, on the leader, before proposing. The
+                log holds the resulting token as plain data, so every node
+                applies the same string. `apply()` never generates anything.
+
+### A4. The interceptor: an unknown token on a follower redirects instead of refusing
+- Chose:        A missing token gives UNAUTHENTICATED everywhere. An
+                *unrecognised* token gives UNAUTHENTICATED on the leader, but on
+                a follower it gives FAILED_PRECONDITION with the leader's
+                address.
+- Alternatives: refuse unknown tokens everywhere; forward every request to the
+                leader.
+- Why:          A follower's session table can lag the leader's. A token the
+                leader minted 2 ms ago may simply not have arrived. Refusing it
+                would tell a valid user "you're not logged in". A follower
+                can't tell "unknown" from "not here yet", and it can't serve
+                the request anyway, so it sends the client where the answer is
+                authoritative. (Part B adds the same care on a *new* leader.)
+- Paper:        —
+- Viva Q:       "Can an attacker use this to find the leader without a token?"
+- Answer:       Yes, with any made-up token, but the address is not a secret:
+                any request without a token at all is refused, and a valid
+                user's first redirect reveals it anyway. It gives away nothing
+                about sessions.
+
+### A5. The §8 dedupe table lives in `apply_fn`, keyed by client_id, one entry per client
+- Chose:        `client_id → (latest seq, Applied)`, in `StateMachine`.
+                `seq == last` returns the stored response. `seq < last` is
+                refused as stale, without executing. Higher executes and
+                stores. `client_id == ""` is never deduplicated. Rejections are
+                stored as well as successes. Fields are on the requests in
+                `auction.proto` (`client_id`, `seq`, new field numbers) and on
+                `Command`.
+- Alternatives: in `AuctionState.apply()`; keep *every* (client, seq) ever seen;
+                key by username; dedupe in the handler on the leader only.
+- Why:          `apply()` is M1 code that the task said not to change, and
+                dedupe has to cover Login/Logout too. One entry per client is
+                exactly §8 ("the latest serial number processed for each
+                client"). It is enough because our client has one write
+                outstanding at a time, so a lower seq can only be a stale
+                duplicate. It has to be replicated state: a handler-side table
+                on the old leader dies with it, and the retry arrives at the
+                new leader. Keying by username fails for two sessions of one
+                user, and Login has no username until it succeeds.
+- Paper:        §8: "the state machine tracks the latest serial number
+                processed for each client, along with the associated response."
+- Viva Q:       "The leader commits a bid, then crashes before replying. The
+                client retries on the new leader. Is the bid placed twice?"
+- Answer:       No. The new leader's log already has the first copy, and
+                applying it put (client, seq) in the table on every node. The
+                retry is a second entry with the same seq, so `apply_fn`
+                returns the stored response and doesn't execute it.
+
+### A6. Error mapping: FAILED_PRECONDITION + trailing metadata, and UNAVAILABLE for every unknown
+- Chose:        `NotLeaderError` gives `FAILED_PRECONDITION`, with trailing
+                metadata `leader-id` and `leader-addr` (the leader's *client*
+                address). Everything else (LEADERSHIP_LOST, STOPPED,
+                OVERWRITTEN, a timeout) gives `UNAVAILABLE` "outcome unknown,
+                retry with the same (client_id, seq)". Done in one place,
+                `server/errors.py`.
+- Alternatives: put the leader in a message field; NOT_FOUND / ABORTED;
+                report OVERWRITTEN as its own "definitely failed" code;
+                forward to the leader on the server side.
+- Why:          A refused call has no response body, so metadata is the only
+                place for a hint. FAILED_PRECONDITION is gRPC's code for "the
+                system isn't in the state this needs; fix that before
+                retrying". UNAVAILABLE is gRPC's "transient, retry" code, and it
+                is also what a dead node looks like. So the client's two retry
+                cases (node dead, outcome unknown) are one branch.
+                OVERWRITTEN does mean "not committed", but the right client
+                action is the same (retry, same seq), and with dedupe a retry
+                is always safe. One rule is easier to get right. Server-side
+                forwarding would need a leader-to-leader proxy and hides
+                topology from the client, and §8 has the client do it.
+- Paper:        §8: the server "will reject the client's request and supply
+                information about the most recent leader it has heard from".
+- Viva Q:       "Your client got UNAVAILABLE for a bid. Was it placed?"
+- Answer:       Maybe. That's why the retry carries the same serial number. If
+                it was placed, the retry returns the original answer; if not,
+                the retry places it. Either way it happens once.
+
+### A7. The closer runs everywhere, proposes only on the leader, one close in flight per auction
+- Chose:        `AuctionCloser.tick(now)`: drop resolved handles; return if
+                not leader; for each due auction with no close in flight,
+                `propose(CloseAuction(id, curr_time=now))` without waiting and
+                keep the handle. `now` is the leader's clock, read once per
+                tick. `apply()` still rejects a duplicate close.
+- Alternatives: start or stop the closer thread on leadership change (an
+                observer hook); have `submit()` block per close; no in-flight
+                set (rely on apply() rejecting duplicates); a close timer per
+                auction on the leader.
+- Why:          Running everywhere and checking `is_leader()` each tick needs
+                no hand-over. A new leader's next tick finds whatever is
+                overdue, and nothing has to be recovered. That keeps M1's
+                "restartable poll loop" property. Not waiting means one slow
+                commit can't stall the loop. Without the in-flight set, a
+                250 ms tick plus a commit slower than that would put two closes
+                in the log. That would still be *correct* (apply rejects the
+                second) but noisy. With it, exactly-once holds on a stable
+                leader without timing luck: the handle resolves only after
+                apply, by which time the auction is no longer due.
+- Paper:        —; CLAUDE.md "Time-dependent values are stamped once, before
+                proposing".
+- Viva Q:       "Two nodes both think they are leader for a moment. Can an
+                auction be closed twice, at two different times?"
+- Answer:       Both may *propose*, but only the real leader's entry commits.
+                The stale leader's entry is overwritten, or committed later
+                behind the first close and rejected by apply() as "already
+                closed". The committed log has exactly one successful close,
+                with one curr_time, the same on every node.
+
+### A8. PlaceBid's high bid is read inside `apply_fn`, returned in `Applied`
+- Chose:        After `AuctionState.apply(PlaceBid)`, `apply_fn` reads the max
+                bid under the state's lock and returns it in `Applied`
+                (`high_bid`, `high_bidder`). The handler replies with that.
+                Stored in the dedupe table with the rest of the response.
+- Alternatives: keep M1's lock-free read in the handler after the wait; add a
+                "high bid" to `apply()`'s `Result` (changes M1 code); drop the
+                fields.
+- Why:          On the leader, by the time `submit()` returns, other bids may
+                have been applied after ours, so a read in the handler can be
+                for a *later* state than our bid's. Inside `apply_fn` we are on
+                the only thread that writes `AuctionState`, under the state
+                machine's lock, so it is exactly the post-state of this
+                command. That is deterministic, so a retry gets the same
+                numbers. `Applied` carries it so `apply()` stays unchanged.
+- Paper:        Figure 2, "respond after entry applied to state machine".
+- Viva Q:       "What does current_high_bid mean in your reply?"
+- Answer:       The highest bid right after *your* bid was applied, in log
+                order. Not "now", because by now it may already be higher.
+
+### A9. A separate peer port with no auth interceptor
+- Chose:        Each process runs two gRPC servers: the client port (Auth +
+                Auction behind `AuthInterceptor`) and the peer port
+                (`RaftService` only, no interceptor). `--peers
+                id=host:peer_port:client_port`.
+- Alternatives: one port, with `RaftService` exempted in the interceptor's
+                `EXEMPT_METHODS`; a shared cluster secret in metadata.
+- Why:          Raft RPCs come from other nodes and carry no session token.
+                Behind the token check, every heartbeat would be refused.
+                Exempting them on one port would put the cluster's internal
+                API on the same socket as the public one, and one mistake in
+                the exempt list exposes it. Two ports keep them apart, and in
+                production the peer port would be firewalled to cluster
+                members and use mutual TLS (each node proves membership with a
+                certificate). That is a transport-level fix, which is why it
+                isn't in the interceptor. Here it is plain TCP on 127.0.0.1, a
+                known gap.
+- Paper:        —
+- Viva Q:       "Can a client send AppendEntries to your node?"
+- Answer:       On the client port, no: that service isn't there. On the peer
+                port, today yes, if it can reach it. In production the peer
+                port takes connections only from cluster members, authenticated
+                by mTLS.
+
+### A10. Leader check before the LLM call; curr_time is stamped before proposing
+- Chose:        `CreateAuction`: `check_leader()`, then the LLM call, then
+                `submit()`. `PlaceBid`: stamp `now_utc()`, then `submit()`. A
+                follower's stamp is discarded with the NOT_LEADER. A retry on a
+                new leader is a new command with a new stamp.
+- Alternatives: no pre-check (`submit` refuses anyway); stamp inside
+                `apply()`; reuse the first attempt's stamp on a retry.
+- Why:          Without the pre-check, a follower would spend seconds of model
+                CPU and then throw the text away. The pre-check can be wrong a
+                microsecond later, but `propose()` decides for real, so it only
+                saves work and never decides an outcome. Stamping in `apply()`
+                would make every node read its own clock (seam 1's bug).
+                Re-stamping a retry is honest: if the first attempt never
+                committed, the bid really did reach the cluster at the retry's
+                time. If it did commit, dedupe returns the first answer and the
+                new stamp is never used.
+- Paper:        CLAUDE.md "LLM output never enters the replicated log as a
+                call"; "stamped once, before proposing".
+- Viva Q:       "A follower receives a bid. Whose clock stamps it?"
+- Answer:       Nobody's. The follower redirects, and the client resends to
+                the leader. Only a leader's reading is ever proposed, and the
+                followers apply that number from the log.
+
+### A11. Handlers wait 5 s for their entry; the in-memory tests wait 1 s
+- Chose:        `RaftReplicator(timeout=5.0)`. After that,
+                `OutcomeUnknownError` → UNAVAILABLE. The integration tests use
+                1.0 s.
+- Alternatives: wait forever; a short value like 0.5 s.
+- Why:          A healthy commit is one round trip (ms). A leader change is an
+                election timeout (0.5-1.0 s) plus a round. 5 s means "something
+                is wrong", and it must stay under the client's own deadline,
+                so the client hears an explicit UNAVAILABLE instead of an
+                ambiguous DEADLINE_EXCEEDED. Waiting forever ties up a gRPC
+                worker per stuck request. The tests use 1 s because they only
+                need "longer than a healthy commit", and they hit the timeout
+                on purpose.
+- Paper:        —
+- Viva Q:       "The wait times out but the entry commits a second later.
+                What did the client see?"
+- Answer:       UNAVAILABLE, outcome unknown. It retries with the same seq,
+                the retry finds the committed entry in the dedupe table, and
+                it gets the real answer.
+
+### A12. `LocalReplicator`: M1 unit tests run unchanged, through the real codec
+- Chose:        `AuctionServicer(state, llm)` and `SessionStore()` with no
+                replicator build a `LocalReplicator`, a cluster of one without
+                Raft that encodes, then calls `apply_fn` directly.
+- Alternatives: make the replicator a required argument and rewrite the M1
+                tests; give the servicer an `if raft is None: apply()` branch.
+- Why:          The M1 tests specify M1 behaviour that still holds (owner from
+                the token, LLM degradation, session semantics). Keeping them
+                unchanged shows that. A direct-`apply()` branch would leave a
+                second write path in the handler, and that is exactly the
+                seam this chunk removes. Through `LocalReplicator`, the only
+                write path is `submit()`, everywhere.
+- Paper:        —
+- Viva Q:       "Is there any code path where a handler still calls apply()?"
+- Answer:       No. Handlers only call `submit()`. In production that is Raft;
+                in M1's unit tests it is a one-node stand-in that still goes
+                through encode and `apply_fn`.
+
+### A13. `serve.py --data-dir` is required
+- Chose:        An auction node always uses `FileStorage`. There is no
+                in-memory mode for `server.serve` (`raft.run_node` keeps its
+                optional one).
+- Alternatives: optional, like `run_node` (P14).
+- Why:          An auction node acknowledges client writes. In memory, a
+                restart forgets acknowledged bids and can double-vote (the
+                strict-xfail runs of the persistence tests show both). For a
+                bare Raft demo that is a choice; for the auction it is a bug.
+- Paper:        Figure 2, "Updated on stable storage before responding to RPCs".
+- Viva Q:       "Can I run a node without a disk?"
+- Answer:       Not an auction node. Use `raft.run_node` for an in-memory Raft
+                demo. Anything that tells a client "your bid is placed" has to
+                survive a restart.
