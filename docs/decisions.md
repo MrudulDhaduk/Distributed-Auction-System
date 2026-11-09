@@ -442,3 +442,438 @@ test-side observer is the real detector; this is the in-process tripwire.
 **Viva: "What if it fires in production?"** Then Election Safety is broken
 (most plausibly a lost `votedFor` after a restart, the persistence gap); crashing
 is the right response.
+
+---
+
+## Replication and repair
+
+Code: `raft/node.py`, `raft/storage.py`, `raft/proposal.py`. Walkthrough:
+[raft-replication.md](raft-replication.md). Known gaps: section 7 of that file.
+These entries use CLAUDE.md's six-field template.
+
+### R1. Entry payload is opaque bytes
+- Chose:        `LogEntry(term: int, data: bytes, kind=COMMAND)` (`raft/messages.py`).
+                Raft copies, stores and ships `data` and never parses it.
+                `propose()` refuses anything that is not `bytes`. The only thing
+                Raft reads on an entry besides its term is `kind`, its own
+                marker for no-ops (R9), never anything inside `data`.
+- Alternatives: store the auction's `Command` dataclasses directly; store a dict or
+                JSON and let Raft look at a "type" field.
+- Why:          The log holds *attempts*; `apply()` decides *outcomes*. A bid that
+                arrives after the auction closed is still a valid log entry: it is
+                committed and replicated like any other, and `apply()` rejects it
+                the same way on every node. If Raft understood commands it would be
+                tempted to judge them, and judging needs state only the state
+                machine has. Bytes also force the encoding question (CLAUDE.md
+                seam: `datetime` fields have no wire form) to be settled once, in
+                the auction layer. Persistence (step 6) needs that encoding anyway.
+- Paper:        Figure 2, State: "each entry contains command for state machine";
+                §5.3. The proto field is called `command` (Figure 2's word), and
+                the Python field `data`.
+- Viva Q:       "How does Raft know a bid is valid before committing it?"
+- Answer:       It doesn't, and it shouldn't. Raft only agrees on the *order* of
+                commands. The deterministic `apply()` decides validity, and every
+                node gets the same verdict because every node sees the same log.
+
+### R2. `apply_fn` is called outside the node lock, by one applier thread
+- Chose:        A dedicated applier thread waits on a `Condition` tied to the node
+                lock. Under the lock it copies the newly committed entries. With
+                the lock released, it calls `apply_fn(index, data)` for each, in
+                order. Then, under the lock again, it sets `lastApplied = index`
+                and resolves that index's handle (`_run_applier`).
+- Alternatives: call `apply_fn` inline, under the lock, in whatever handler or reply
+                thread advanced `commitIndex`; do the same but release the lock
+                first; one thread per entry.
+- Why:          `apply_fn` is user code with its own lock (`AuctionState`). Calling
+                it under the node lock (a) hands lock ordering to the user (node
+                lock then auction lock; any path taking them the other way
+                deadlocks), (b) blocks heartbeats and votes for as long as
+                `apply()` runs, and (c) deadlocks outright if `apply_fn` calls back
+                into the node, because the lock is not reentrant. Applying from
+                whichever thread advanced `commitIndex` (even unlocked) would let
+                two threads apply at once, out of order. A single thread is the
+                simplest way to get "in index order, exactly once". Copying the
+                entries out first is safe because committed entries never change.
+                A test makes `apply_fn` call `status()`; it would deadlock if this
+                were wrong.
+- Paper:        Figure 2, All Servers: "If commitIndex > lastApplied: increment
+                lastApplied, apply log[lastApplied] to state machine (§5.3)".
+- Viva Q:       "`lastApplied` is updated after `apply_fn` returns. What if the node
+                crashes in between?"
+- Answer:       Then it has applied an entry that `lastApplied` doesn't count. Today
+                that's harmless: a restart loses the state machine too, and the node
+                replays from index 1. With persistence, `lastApplied` and the state
+                machine have to be saved together, or the state machine rebuilt
+                from the log at boot. That's a step 6 decision (gap 2).
+
+### R3. An exception in `apply_fn` halts this node's applier (fail-stop)
+- Chose:        Log at CRITICAL and stop the applier thread. `lastApplied` stays
+                below the failed index, and pending handles stay pending until the
+                node stops (STOPPED). Tested.
+- Alternatives: log and skip the entry; retry it; crash the process.
+- Why:          Skipping would quietly make this replica differ from the others
+                while it keeps serving, which a replicated state machine must never
+                do. Retrying might apply half an entry twice. Stopping is loud and
+                leaves the other replicas correct. `apply()` is meant to *return*
+                rejections (bid too low, auction closed), not raise them, so an
+                exception means a bug. The node doesn't crash the whole process so
+                the in-memory tests can still observe what happened.
+- Paper:        none (the paper assumes a correct state machine).
+- Viva Q:       "One node's apply raises. What happens to the cluster?"
+- Answer:       That node stops applying. It still votes and replicates, so the
+                cluster keeps committing. If the bug is deterministic, every node
+                halts at the same index, which leaves the same state everywhere.
+
+### R4. What `propose()`'s success means
+- Chose:        `propose(data)` returns a `Proposal` handle at once. The outcomes
+                are defined in `raft/proposal.py`:
+                - **APPLIED**: the entry with exactly this `(index, term)` was
+                  committed and the leader's `apply_fn` returned; `result` is its
+                  return value.
+                - **NOT_LEADER**: refused at once, nothing appended, `leader_hint`
+                  given.
+                - **LEADERSHIP_LOST** / **STOPPED**: the outcome is *unknown*.
+                - **OVERWRITTEN**: an entry with a different term was applied at
+                  that index.
+                A handle resolves once and never changes.
+- Alternatives: resolve on *commit* instead of on apply; block inside `propose()`;
+                when leadership is lost, keep the handle and settle it later when
+                the node (now a follower) applies that index.
+- Why:          Figure 2 says to "respond after entry applied to state machine", and
+                apply is when there is a result to return (the high bid after a
+                `PlaceBid`). It is also the strongest claim that is always true.
+                APPLIED means a majority stored the entry under the current-term
+                rule, so by Leader Completeness and State Machine Safety every node
+                that applies that index applies this entry. The **term** matters as
+                much as the index: matching on index alone would accept a
+                *different* entry that landed in the same slot after a leader
+                change. On leadership loss the handle fails instead of waiting,
+                because the spec asks for that and because an ex-leader can't
+                promise anything any more. The price is that LEADERSHIP_LOST is an
+                honest "don't know" (the next leader may still commit the entry),
+                so a client that retries can create a duplicate. The OVERWRITTEN
+                branch is defence in depth and cannot trigger today: handles only
+                exist on a leader, a leader never overwrites its own log, and
+                handles are failed when it steps down.
+- Paper:        Figure 2, Leaders: "If command received from client: append entry to
+                local log, respond after entry applied to state machine (§5.3)";
+                §8 (client interaction, duplicate detection).
+- Viva Q:       "Your handle failed. Was the bid placed?"
+- Answer:       Maybe. Only APPLIED means yes. Only NOT_LEADER and OVERWRITTEN mean
+                no. LEADERSHIP_LOST is like a timeout. The property checker will
+                only check acknowledged (APPLIED) entries. Exactly-once retries
+                would need client ids and sequence numbers (§8), which we don't
+                have yet (gap 4).
+
+### R5. The persistence seam: storage holds the state, and the node keeps no copy
+- Chose:        `MemoryStorage` (`raft/storage.py`) holds currentTerm, votedFor and
+                log[]. Its three write methods (`set_term_and_vote`, `append`,
+                `truncate_from`) are the only way to change them. The node reads
+                term and vote through read-only properties, so
+                `self._current_term = 5` raises `AttributeError` (tested).
+- Alternatives: keep the fields in the node and *also* call a `persist()` hook after
+                each change; call one `save_all()` after every handler.
+- Why:          Two copies can drift apart. If one write path forgets the hook,
+                step 6 silently fails to make that write durable. With a single
+                copy, the code enforces "every write goes through the seam"; it
+                doesn't rely on discipline. Term and vote are written together
+                because a vote only means something with the term it was cast in;
+                separate writes would leave a crash window holding a new term and
+                an old vote. Step 6 makes each method durable before it returns.
+                Every handler builds its reply after these calls, which is exactly
+                "updated on stable storage before responding to RPCs".
+- Paper:        Figure 2, State, "Persistent state on all servers (Updated on stable
+                storage before responding to RPCs)".
+- Viva Q:       "Where would you add the fsync?"
+- Answer:       Inside those three methods, before they return. Nothing in
+                `node.py` has to change, because every handler already returns its
+                reply only after the write calls.
+
+### R6. Plain nextIndex backoff, no conflict-term optimisation
+- Chose:        On a consistency-check refusal, `nextIndex -= 1` and retry at once
+                (`_on_append_reply`). That costs one extra RPC per divergent entry.
+- Alternatives: §5.3's optimisation (the follower returns the conflicting term and
+                the first index it holds for that term, so the leader skips a whole
+                term per RPC); a cheaper variant where the follower returns its log
+                length and the leader jumps straight to it.
+- Why:          The plain rule is the one Figure 2 states. It is three lines and
+                obviously safe: the leader only ever steps back one entry at a time
+                towards the point where the logs match. The optimisation needs
+                fields the handout's reply doesn't have (it only has `matchIndex`),
+                and getting the skip slightly wrong is a classic bug (overshooting
+                is fine; landing past the match point is not). The paper itself
+                says "we doubt this optimization is necessary". Retrying
+                *immediately* rather than at the next heartbeat keeps repair at one
+                round trip per entry (about 1 ms on localhost) instead of 100 ms.
+- Paper:        Figure 2, Leaders: "If AppendEntries fails because of log
+                inconsistency: decrement nextIndex and retry (§5.3)"; end of §5.3.
+- Viva Q:       "A follower missing 10,000 entries comes back. How long does repair take?"
+- Answer:       With plain backoff, finding the match point takes one refused probe
+                per missing entry: about 10,000 round trips, even though the
+                follower is only *short*. Sending the entries after that takes
+                another 10,000 / 64, about 157. On localhost that's a few seconds.
+                Over a WAN it would be the reason to add the optimisation (even the
+                cheap "reply with my log length" variant fixes the short-follower
+                case), and it fits in `_on_append_reply` without touching the
+                receiver's safety logic. Gap 3.
+
+### R7. One AppendEntries in flight per peer, immediate follow-ups, at most 64 entries
+- Chose:        `_ae_in_flight` (renamed from `_hb_in_flight`) allows one unanswered
+                AppendEntries per peer. A reply sends the next RPC at once if the
+                peer is still behind. `propose()` sends to idle peers at once. The
+                heartbeat tick covers retries after a lost RPC.
+                `MAX_ENTRIES_PER_RPC = 64`.
+- Alternatives: pipelining (several outstanding RPCs per peer); sending only on the
+                heartbeat tick; unbounded batches.
+- Why:          With one RPC outstanding per peer, a reply always answers the probe
+                in progress, so the leader's bookkeeping stays easy to follow.
+                Pipelining would need per-RPC tracking and handling of
+                out-of-order replies. Sending only on ticks would add up to 100 ms
+                to every commit and every repair step. The cap of 64 keeps one RPC
+                small (gRPC's default limit is 4 MB) and limits how long a follower
+                holds its lock for a single request.
+- Paper:        Figure 2, AppendEntries: entries "may send more than one for
+                efficiency"; §5.3: "the leader retries AppendEntries RPCs
+                indefinitely".
+- Viva Q:       "What if the reply is lost?"
+- Answer:       Any failure clears the flag, and the next heartbeat tick resends
+                from the same nextIndex. The receiver is idempotent (R10), so if
+                the request did arrive the resend is harmless.
+
+### R8. The Figure 8 rule: count replicas only for current-term entries
+- Chose:        `_advance_commit` scans N from the last index down to
+                `commitIndex + 1`, **stops** at the first entry whose term isn't
+                `currentTerm`, and otherwise commits the first N that a majority
+                holds (the leader counts itself).
+- Alternatives: commit the highest N a majority holds, whatever its term (the bug
+                Figure 8 shows); also count old-term entries when they are on
+                *every* node (the paper says that would be safe, but it's more code
+                for no benefit).
+- Why:          A majority holding an old-term entry doesn't stop a node with a
+                *later* last term from winning an election and overwriting that
+                entry. Figure 8(d) shows this, and
+                `test_figure8_old_term_entry_on_a_majority_is_not_committed` makes
+                it happen. A current-term entry on a majority does stop it: every
+                majority of voters includes a node whose last term is the current
+                one, and that node refuses any candidate whose last term is older.
+                Once that entry commits, Log Matching makes everything before it
+                committed too. Breaking at the first old term is correct because
+                terms never decrease along a log, so every lower N is old as well.
+- Paper:        Figure 2, Leaders, last bullet ("and log[N].term == currentTerm");
+                §5.4.2; Figure 8.
+- Viva Q:       "The entry is on a majority. Why isn't it committed?"
+- Answer:       Because it's from an older term, and Figure 8 shows that a majority
+                copy of an old-term entry can still be overwritten. It becomes
+                committed as soon as an entry from my own term above it reaches a
+                majority. The trace in raft-replication.md shows commitIndex
+                jumping straight from 0 to 4.
+
+### R9. A new leader appends a no-op entry at the start of its term
+- Chose:        `_become_leader` appends `LogEntry(currentTerm, b"", EntryKind.NOOP)`
+                as its first act and replicates it like any entry. It sets
+                nextIndex[] *before* appending, so the first AppendEntries to
+                each peer carries the no-op. The kind is an explicit field
+                (`EntryKind.COMMAND` / `NOOP`, also on the wire as a proto enum).
+                The applier advances lastApplied over a no-op without calling
+                `apply_fn`, so **apply_fn's indexes can skip numbers**.
+- Alternatives: (a) No no-op (this chunk's first version). Old-term entries a
+                new leader holds commit only when a client's `propose()` puts a
+                current-term entry on a majority. Not in Figure 2, so it is
+                closer to the spec, and `apply_fn` sees every index. Rejected
+                because it costs liveness: until the next proposal, a new
+                leader (and its followers) can't apply entries that were
+                *already committed* under the previous leader. The chaos test
+                stalled once in ten runs, most likely for this reason, and the
+                first fix was a test workaround (keep proposing until everyone
+                caught up). That workaround is reverted now.
+                (b) Mark no-ops by `data == b""`: an empty command is a legal
+                client payload, so this would silently swallow one.
+                (c) Show no-ops to `apply_fn` and let it ignore them: that hands
+                a Raft-internal detail to the state machine. A dense index
+                sequence isn't worth that.
+                (d) Set nextIndex after appending the no-op: also correct, but
+                every follower's first reply would then be a refusal, costing
+                one wasted round trip per follower per election.
+- Why:          The Figure 8 rule (R8) means a leader can only commit by
+                counting replicas of a *current-term* entry. A fresh leader has
+                none. The no-op is a current-term entry that exists immediately,
+                so the cluster's commitIndex catches up after every election
+                without depending on clients. It also has to be there before
+                leader-served reads (§8): a leader can't answer reads correctly
+                until it knows its commitIndex is current.
+                `test_old_term_entries_commit_after_a_leader_change_with_no_new_proposals`
+                shows it: entries on a majority, two leader changes, zero
+                proposals, every node applies them. Against the old `node.py`
+                that test times out. The chaos test converges only through it
+                too.
+- Paper:        §8 ("each leader commit a blank no-op entry into the log at the
+                start of its term"); Figure 8 and §5.4.2 for why it's needed.
+- Viva Q:       "After failover, why does the new leader write an empty entry?"
+- Answer:       Because it may only commit entries from its own term (Figure 8).
+                The no-op is that entry. Once it's on a majority, everything
+                before it is committed too, including entries the old leader had
+                committed but the new one couldn't know about. It never reaches
+                the state machine, so apply_fn's indexes skip it.
+
+### R10. Receiver: truncate only on a real conflict; commitIndex never goes down
+- Chose:        `_merge_entries` walks the incoming entries alongside the local log:
+                - same index, same term: skip;
+                - same index, different term: truncate from there and append the
+                  rest;
+                - past the end of the log: append the rest.
+                Step 5 uses `min(leaderCommit, prevIndex + len(entries))`, and
+                `_set_commit_index` never lowers `commitIndex`.
+- Alternatives: "truncate everything after prevIndex, then append" (the common
+                bug); in step 5, use the local last index instead of the last *new*
+                entry.
+- Why:          A duplicated or delayed AppendEntries carries a *prefix* of what the
+                follower already has. Truncating after that prefix would delete
+                entries that match. The leader may already have counted those
+                entries toward a commit, so losing them can lose committed data.
+                The "last new entry" bound exists because entries beyond it have
+                not been checked against this leader's log. For a delayed RPC the
+                min can be below the current `commitIndex`; Figure 2 says
+                commitIndex "increases monotonically", so the higher value is kept.
+- Paper:        Figure 2, AppendEntries receiver steps 3-5; §5.5 ("Raft RPCs are
+                idempotent ... it ignores those entries in the new request").
+- Viva Q:       "Why not just truncate after prevLogIndex? The leader's log is the truth."
+- Answer:       The leader's log is the truth, but this request may be an *old*
+                message from that leader, carrying fewer entries than it has sent
+                since. Deleting on old information can remove an entry the leader
+                has already counted as replicated.
+
+### R11. matchIndex comes from the request, not the reply
+- Chose:        On success, `match = args.prev_index + len(args.entries)`, raised
+                only if larger, and `nextIndex = matchIndex + 1`. The reply's
+                `matchIndex` field (from the handout) carries the same number, but
+                the leader doesn't rely on it.
+- Alternatives: trust `reply.match_index`.
+- Why:          The leader knows exactly what it sent and what the follower
+                confirmed. Using its own request means a buggy reply can't inflate
+                a commit count. Taking the `max` handles a delayed success that
+                arrives after a newer one.
+- Paper:        Figure 2, Leaders: "If successful: update nextIndex and matchIndex
+                for follower"; matchIndex "increases monotonically".
+- Viva Q:       "Two success replies arrive out of order. What happens?"
+- Answer:       The older reply proves less, the `max` keeps the larger value, and
+                nextIndex is recomputed from it.
+
+### R12. Stale-reply guards on the leader
+- Chose:        (a) A refusal decrements nextIndex only if
+                `nextIndex == args.prev_index + 1` (the refusal is about the probe
+                in progress), and never below 1. (b) The in-flight flag is cleared
+                only by a reply whose `args.term` is the current term.
+- Alternatives: decrement on every refusal; clear the flag on any reply.
+- Why:          (a) A delayed refusal of an older probe would decrement a second
+                time and skip past the match point. That stays safe (the next probe
+                fails or re-sends matching entries), but it wastes round trips and
+                is confusing to read. (b) A straggler from an earlier leadership
+                would clear the flag of the new term's RPC and allow two
+                outstanding RPCs. Both guards are about tidiness and efficiency.
+                Safety comes from the receiver's checks.
+- Paper:        §5.3.
+- Viva Q:       "What if the decrement goes wrong?"
+- Answer:       Raft stays safe. The follower's consistency check refuses anything
+                that doesn't match, so a wrong nextIndex only costs extra round
+                trips.
+
+### R13. The `last_log` hook is gone; the election vote tests use a real log
+- Chose:        The constructor parameter `last_log` (E12) is removed, and
+                `_last_log()` now reads storage. Two election tests now build their
+                voter with `MemoryStorage(term=2, entries=[t1, t2, t2])`, whose last
+                entry is (index 3, term 2), the same as the old `lambda: (3, 2)`:
+                - `test_vote_requires_candidate_log_at_least_as_up_to_date`
+                  (5 cases);
+                - `test_refused_stale_candidate_does_not_burn_the_vote`.
+                The election `Cluster` lost its unused `last_logs` argument.
+- Alternatives: keep `last_log` as an optional override for tests.
+- Why:          A test-only hook in production code is one more thing to explain at
+                the viva, for no benefit. A pre-filled storage is the real mechanism
+                (it is what a restart will look like in step 6), and the assertions
+                didn't change.
+- Paper:        §5.4.1.
+- Viva Q:       "Did you change the tests to make them pass?"
+- Answer:       Only how the voter's log is built, not what is asserted. The inputs
+                (last entry index 3, term 2) and the expected grants are identical.
+
+### R14. Index-0 sentinel in the log
+- Chose:        Slot 0 of the storage list is `LogEntry(0, b"")`; real entries start
+                at 1.
+- Alternatives: a 0-based list with `-1` arithmetic everywhere; a special case for
+                `prevLogIndex == 0`.
+- Why:          The paper's indexes are 1-based, and `prevLogIndex = 0,
+                prevLogTerm = 0` means "before the first entry". With the sentinel,
+                `term_at(0) == 0`, so step 2 needs no special case. The code and the
+                paper use the same numbers, so the trace can be read directly
+                against Figure 2. The sentinel can't be deleted
+                (`truncate_from(0)` raises) and is never returned by
+                `entries_from`.
+- Paper:        Figure 2, State: "first index is 1".
+- Viva Q:       "What does prevLogIndex 0 mean?"
+- Answer:       "Append at the very start." The empty prefix always matches, so the
+                check passes, and that's how a follower with an empty log receives
+                its first entries.
+
+### R15. Scenario tests use a deterministic leader and pre-filled logs
+- Chose:        In the Figure 7, Figure 8 and catch-up tests, exactly one node has
+                a short election timeout and all the others have 30 s. Starting
+                logs come from `MemoryStorage(term, entries)`, and payloads depend
+                only on (index, term).
+- Alternatives: let all nodes race and accept whichever wins; build the divergent
+                logs by actually crashing leaders one after another.
+- Why:          In these tests the scenario is the point. If the wrong node can win,
+                the test checks a different scenario. That is exactly how the first
+                draft of the stale-log test flaked: n3 was repaired by the leader
+                and then won legitimately. Building Figure 7 from real crashes would
+                take many timing-dependent steps. Making the payload a function of
+                (index, term) keeps the pre-filled logs consistent with Log
+                Matching. The randomised safety test is the one place where we
+                *want* races.
+- Paper:        Figures 7 and 8.
+- Viva Q:       "Isn't a 30-second timeout cheating?"
+- Answer:       It fixes who campaigns, not what the algorithm does. Votes, the
+                consistency check, repair and commit all run unmodified. Elections
+                under real contention are tested separately (E19, and the chaos
+                test in this chunk).
+
+### R16. A tripwire: a follower never deletes a committed entry
+- Chose:        `_merge_entries` asserts `index > commitIndex` before truncating.
+- Alternatives: no check (trust the proof); log a warning and carry on.
+- Why:          By Leader Completeness this can't happen. If it ever does, State
+                Machine Safety is already broken, and crashing is better than
+                applying a different entry at an index this node has already
+                applied. Same idea as E20.
+- Paper:        Figure 3, Leader Completeness and State Machine Safety.
+- Viva Q:       "Which bug would fire it?"
+- Answer:       A broken election restriction, the Figure 8 counting bug, or (after
+                step 6) a node that forgot its log on restart but kept its
+                commitIndex.
+
+### R17. The Figure 8 tests hold the no-op back with a message-losing `Gate`
+- Chose:        A test-only `Transport` wrapper. `gate.cap[("n1", "n2")] = 2` loses
+                every n1 -> n2 AppendEntries that would **successfully** take n2
+                past index 2. Messages n2 would refuse anyway still get through,
+                so n1 can back up. The test also sets one entry per RPC
+                (`monkeypatch` on `MAX_ENTRIES_PER_RPC`). The result: n2 gets
+                the old term-2 entry, n1 learns `matchIndex[n2] = 2`, and the
+                no-op stays on n1 alone.
+- Alternatives: trim entries out of messages instead of losing them; a fully
+                scripted fake follower; building the situation only from
+                pre-filled logs, without n1 ever leading.
+- Why:          With the no-op (R9), the old entry and the no-op normally travel
+                in the same RPC, so the Figure 8 situation (old-term entry on a
+                majority, leader knows it, nothing committed) never occurs on
+                its own. Losing messages is legal network behaviour, and Raft
+                must be safe under any pattern of loss, so the gate creates a
+                legal schedule rather than faking one. Trimming would be
+                unsound: the leader computes matchIndex from what it *sent*
+                (R11), so a trimmed delivery would make it believe n2 has
+                entries it doesn't. Pre-filled logs alone would never run the
+                leader's counting code against `matchIndex`, which is the code
+                under test.
+- Paper:        Figure 8; §5.4.2.
+- Viva Q:       "Your test peeks at the follower's log. Isn't that cheating?"
+- Answer:       The peek only decides *which* messages get lost. Nothing in the
+                node is changed or bypassed, and every message that arrives is
+                exactly what the leader sent. It's an adversarial but legal
+                network, the kind Raft's safety argument already has to cover.
