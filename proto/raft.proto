@@ -58,9 +58,19 @@ message RequestVoteResponse {
 // the Raft layer never looks inside (raft.messages.LogEntry calls it
 // `data`), and (CLAUDE.md) LLM output only ever enters the log as already-
 // generated plain data.
+// COMMAND entries carry a client's opaque payload for apply_fn. NOOP is
+// Raft's own entry: a new leader appends one at the start of its term
+// (section 8) and it is never shown to apply_fn. COMMAND = 0 so an entry
+// without the field decodes as an ordinary command.
+enum EntryKind {
+  COMMAND = 0;
+  NOOP = 1;
+}
+
 message LogEntry {
   int64 term = 1;
   bytes command = 2;
+  EntryKind kind = 3;
 }
 
 message AppendEntriesRequest {

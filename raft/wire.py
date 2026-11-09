@@ -10,6 +10,7 @@ from generated import raft_pb2
 from raft.messages import (
     AppendEntriesArgs,
     AppendEntriesReply,
+    EntryKind,
     LogEntry,
     RequestVoteArgs,
     RequestVoteReply,
@@ -48,15 +49,20 @@ def vote_reply_from_wire(m: raft_pb2.RequestVoteResponse) -> RequestVoteReply:
     )
 
 
+_KIND_TO_WIRE = {EntryKind.COMMAND: raft_pb2.COMMAND, EntryKind.NOOP: raft_pb2.NOOP}
+_KIND_FROM_WIRE = {v: k for k, v in _KIND_TO_WIRE.items()}
+
+
 def entry_to_wire(e: LogEntry) -> raft_pb2.LogEntry:
     # Python calls the payload `data`; the proto calls it `command`, Figure
     # 2's word ("each entry contains command for state machine"). Either
     # way it is opaque bytes, copied unchanged.
-    return raft_pb2.LogEntry(term=e.term, command=e.data)
+    return raft_pb2.LogEntry(term=e.term, command=e.data, kind=_KIND_TO_WIRE[e.kind])
 
 
 def entry_from_wire(m: raft_pb2.LogEntry) -> LogEntry:
-    return LogEntry(term=m.term, data=m.command)
+    # An unknown kind number raises KeyError: better than guessing.
+    return LogEntry(term=m.term, data=m.command, kind=_KIND_FROM_WIRE[m.kind])
 
 
 def append_args_to_wire(a: AppendEntriesArgs) -> raft_pb2.AppendEntriesRequest:

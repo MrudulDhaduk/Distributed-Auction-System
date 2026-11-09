@@ -1,6 +1,7 @@
 """The Raft node core (Raft paper, Ongaro & Ousterhout, Figure 2): leader
 election (section 5.2), log replication and repair (5.3), the election
-restriction and the commit rule (5.4). Persistent state goes through
+restriction and the commit rule (5.4), and the leader's no-op entry at the
+start of its term (section 8). Persistent state goes through
 raft/storage.py; it is in memory only until step 6.
 
 Why this file looks the way it does -- the invariants first
@@ -49,8 +50,9 @@ Threading model
   * ONE ticker thread owns time: it wakes every TICK_INTERVAL, and under the
     lock checks the election deadline (follower/candidate) or the next
     heartbeat time (leader). It never sends an RPC itself.
-  * ONE applier thread hands committed entries to apply_fn, in index order,
-    with the lock RELEASED (apply_fn is user code with its own lock).
+  * ONE applier thread hands committed COMMAND entries to apply_fn, in
+    index order, with the lock RELEASED (apply_fn is user code with its own
+    lock). NOOP entries are counted in lastApplied but never handed over.
   * The node never imports grpc. It talks to peers through the Transport
     interface in raft/messages.py.
 
@@ -70,6 +72,7 @@ from typing import Any, Callable, Optional, Sequence
 from raft.messages import (
     AppendEntriesArgs,
     AppendEntriesReply,
+    EntryKind,
     LogEntry,
     RequestVoteArgs,
     RequestVoteReply,
@@ -166,11 +169,13 @@ class RaftNode:
             Default: a fresh, empty MemoryStorage. Every read and write of
             that state goes through it (raft/storage.py explains the seam).
         apply_fn: apply_fn(index, data) -> result. Called exactly once per
-            committed entry, in index order, from the applier thread, with
-            the node lock NOT held, so it may take its own locks and call
-            back into this node. Its return value becomes Proposal.result
-            on the leader that proposed the entry. It must be deterministic
-            and should not raise (an exception halts this node's applier:
+            committed COMMAND entry, in increasing index order, from the
+            applier thread, with the node lock NOT held, so it may take its
+            own locks and call back into this node. The indexes it sees can
+            SKIP numbers: a skipped index holds a leader's no-op (R9). Its
+            return value becomes Proposal.result on the leader that
+            proposed the entry. It must be deterministic and should not
+            raise (an exception halts this node's applier:
             docs/decisions.md, R3). Default: ignore entries.
         """
         lo, hi = election_timeout
@@ -437,6 +442,19 @@ class RaftNode:
         self._next_index = {peer: last_index + 1 for peer in self._peers}
         self._match_index = {peer: 0 for peer in self._peers}
         self._next_heartbeat = 0.0
+        # Section 8: "each leader commit a blank no-op entry into the log at
+        # the start of its term". Until an entry of ITS term is committed, a
+        # new leader cannot commit anything (the Figure 8 rule), not even
+        # entries it holds that were already committed. The no-op is that
+        # entry, so no client has to propose first. Appended AFTER nextIndex
+        # is set, so the first AppendEntries to each peer carries it.
+        # (docs/decisions.md, R9)
+        self._storage.append([LogEntry(self._current_term, b"", EntryKind.NOOP)])
+        log.info(
+            "[%s] term %d: appended no-op at index %d",
+            self.node_id, self._current_term, self._storage.last_index(),
+        )
+        self._advance_commit()  # only matters in a cluster of one
 
     def _prepare_appends(self, peers) -> list:
         """One AppendEntries per peer in `peers` that has none in flight."""
@@ -756,7 +774,8 @@ class RaftNode:
 
         One thread does all applying, so apply_fn sees entries strictly in
         index order and each exactly once: only this thread moves
-        lastApplied, by one, after each apply_fn call returns. The entries
+        lastApplied, by one, after each entry is done (apply_fn returned,
+        or the entry was a no-op and apply_fn was not called). The entries
         are copied out under the lock and handed over with the lock
         RELEASED. Copying is safe because committed entries never change.
         """
@@ -769,17 +788,22 @@ class RaftNode:
                 first = self._last_applied + 1
                 batch = self._storage.entries_from(first, self._commit_index - self._last_applied)
             for index, entry in enumerate(batch, start=first):
-                try:
-                    result = self._apply_fn(index, entry.data)  # no lock held
-                except Exception:
-                    # Skipping the entry would make this replica differ from
-                    # the others; retrying might apply half of it twice.
-                    # Fail-stop instead: this node applies nothing more.
-                    log.critical(
-                        "[%s] apply_fn raised at index %d; applier halted",
-                        self.node_id, index, exc_info=True,
-                    )
-                    return
+                if entry.kind is EntryKind.NOOP:
+                    # Raft's own entry: counted in lastApplied, never shown to
+                    # the state machine. apply_fn's indexes skip this one.
+                    result = None
+                else:
+                    try:
+                        result = self._apply_fn(index, entry.data)  # no lock held
+                    except Exception:
+                        # Skipping the entry would make this replica differ
+                        # from the others; retrying might apply half of it
+                        # twice. Fail-stop instead: apply nothing more.
+                        log.critical(
+                            "[%s] apply_fn raised at index %d; applier halted",
+                            self.node_id, index, exc_info=True,
+                        )
+                        return
                 with self._lock:
                     self._last_applied = index
                     self._resolve_applied(index, entry.term, result)

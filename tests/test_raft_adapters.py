@@ -12,6 +12,7 @@ from raft import wire
 from raft.messages import (
     AppendEntriesArgs,
     AppendEntriesReply,
+    EntryKind,
     LogEntry,
     RequestVoteArgs,
     RequestVoteReply,
@@ -45,6 +46,15 @@ def test_wire_round_trips_entries_as_opaque_bytes():
     back = wire.append_args_from_wire(raft_pb2.AppendEntriesRequest.FromString(m.SerializeToString()))
     assert back == aa
     assert all(isinstance(e, LogEntry) for e in back.entries)
+
+
+def test_wire_carries_the_entry_kind():
+    es = (LogEntry(4, b"", EntryKind.NOOP), LogEntry(4, b"", EntryKind.COMMAND))
+    m = wire.append_args_to_wire(AppendEntriesArgs("n1", "n2", 4, 0, 0, 0, es))
+    assert [e.kind for e in m.entries] == [raft_pb2.NOOP, raft_pb2.COMMAND]
+    back = wire.append_args_from_wire(raft_pb2.AppendEntriesRequest.FromString(m.SerializeToString()))
+    # An empty COMMAND stays a command: the kind, not the payload, decides.
+    assert [e.kind for e in back.entries] == [EntryKind.NOOP, EntryKind.COMMAND]
 
 
 def test_wire_uses_the_handouts_field_names():

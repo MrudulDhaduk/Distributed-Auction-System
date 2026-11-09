@@ -11,6 +11,7 @@ repo's Request / Response convention. Field names are the handout's, in
 snake_case, with `from` -> `from_id` for the reason given in raft.proto.
 """
 
+import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -32,6 +33,18 @@ class RequestVoteReply:
     vote_granted: bool
 
 
+class EntryKind(enum.Enum):
+    """COMMAND: a client's payload, delivered to apply_fn once committed.
+    NOOP: Raft's own entry, appended by a new leader at the start of its
+    term (section 8) so that it can commit; never delivered to apply_fn.
+    An explicit field, not a convention like `data == b""`: an empty
+    command is a legal client payload. (docs/decisions.md, R9)
+    """
+
+    COMMAND = "COMMAND"
+    NOOP = "NOOP"
+
+
 @dataclass(frozen=True)
 class LogEntry:
     """One slot of Figure 2's log[]: "each entry contains command for state
@@ -45,6 +58,7 @@ class LogEntry:
 
     term: int
     data: bytes
+    kind: EntryKind = EntryKind.COMMAND
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,13 @@ failing test):
     wait for the positive precondition first (the entry has reached a
     majority), then hold for many heartbeat periods. A buggy leader would
     commit within one reply, so the hold is ~10x what a bug needs.
+  * Every new leader appends a no-op (section 8), and the no-op commits old
+    entries by itself. To set up Figure 8 ("on a majority, NOT committed")
+    the tests therefore hold the no-op back with Gate, which loses (never
+    alters) the AppendEntries that would take one follower past a given
+    index.
+  * apply_fn never sees no-ops, so its indexes skip numbers. Tests compare
+    applied DATA, or applied indexes against the node's own log.
   * The State Machine Safety test is randomised on purpose: seeded chaos,
     real thread interleavings, an invariant checked over the whole history.
 """
@@ -29,7 +36,14 @@ from collections import defaultdict
 
 import pytest
 
-from raft.messages import AppendEntriesArgs, LogEntry, RequestVoteArgs
+from raft.messages import (
+    AppendEntriesArgs,
+    EntryKind,
+    LogEntry,
+    RequestVoteArgs,
+    Transport,
+    TransportError,
+)
 from raft.node import Outcome, RaftNode, Role
 from raft.storage import MemoryStorage
 from raft.transport import InMemoryTransport
@@ -57,12 +71,47 @@ def entries(terms):
     return [LogEntry(t, f"{i}@{t}".encode()) for i, t in enumerate(terms, start=1)]
 
 
+class Gate(Transport):
+    """Wraps the network. `cap[(sender, receiver)] = k` LOSES every
+    AppendEntries from sender to receiver that would SUCCESSFULLY take the
+    receiver past index k. Requests the receiver will refuse anyway (it
+    lacks the prevIndex entry) still get through, so the leader can back up
+    and send older entries.
+
+    It only ever loses whole messages; it never alters one. (Trimming
+    entries would make the leader's matchIndex, computed from what it sent,
+    R11, lie.) Losing messages, in any pattern, is ordinary network
+    behaviour that Raft must be safe under; it retries on the next tick."""
+
+    def __init__(self, net):
+        self._net = net
+        self.nodes = {}
+        self.cap = {}
+
+    def request_vote(self, to, args):
+        return self._net.request_vote(to, args)
+
+    def append_entries(self, to, args):
+        k = self.cap.get((args.from_id, to))
+        if k is not None and args.prev_index + len(args.entries) > k and self._would_accept(to, args):
+            raise TransportError(f"gate: {args.from_id} -> {to} held at index {k}")
+        return self._net.append_entries(to, args)
+
+    def _would_accept(self, to, args):
+        if args.prev_index == 0:
+            return True
+        log_ = self.nodes[to].log_entries()
+        return len(log_) >= args.prev_index and log_[args.prev_index - 1].term == args.prev_term
+
+
 class Cluster:
-    """Nodes on one InMemoryTransport. Records every node's applied
-    sequence (via apply_fn) and every leader per term (via the observer)."""
+    """Nodes on one InMemoryTransport (behind a Gate that is open unless a
+    test sets caps). Records every node's applied sequence (via apply_fn)
+    and every leader per term (via the observer)."""
 
     def __init__(self, n=3, seed=0, logs=None, term=0, per_node=None, **config):
         self.net = InMemoryTransport()
+        self.gate = Gate(self.net)
         self.ids = [f"n{i}" for i in range(1, n + 1)]
         self.applied = {nid: [] for nid in self.ids}
         self.leaders_by_term = defaultdict(set)
@@ -73,7 +122,7 @@ class Cluster:
             node = RaftNode(
                 nid,
                 [p for p in self.ids if p != nid],
-                self.net,
+                self.gate,
                 rng=random.Random(seed * 1000 + i),
                 observer=self._observe,
                 storage=MemoryStorage(term=term, entries=entries((logs or {}).get(nid, ()))),
@@ -82,6 +131,7 @@ class Cluster:
             )
             self.nodes[nid] = node
             self.net.register(node)
+        self.gate.nodes = self.nodes
 
     def _apply_fn_for(self, nid):
         def apply_fn(index, data):
@@ -341,15 +391,17 @@ def test_proposed_entries_are_applied_on_all_nodes_in_the_same_order(cluster):
     for k, h in enumerate(handles):
         assert h.wait(BOUND), f"proposal {k} never resolved"
         assert h.outcome is Outcome.APPLIED and h.ok
-        assert h.index == k + 1 and h.term == leader.status().term
+        # Index 1 is the leader's no-op, so client entries start at 2.
+        assert h.index == k + 2 and h.term == leader.status().term
         # The handle carries apply_fn's return value from the LEADER's apply.
-        assert h.result == ("n1", k + 1)
+        assert h.result == ("n1", k + 2)
 
     c.wait_applied(c.ids, 5)
     expected = [f"cmd{k}".encode() for k in range(5)]
     for nid in c.ids:
         assert c.applied_data(nid) == expected
-        assert [i for i, _ in c.applied[nid]] == [1, 2, 3, 4, 5]
+        # apply_fn never saw index 1 (the no-op): its indexes skip it.
+        assert [i for i, _ in c.applied[nid]] == [2, 3, 4, 5, 6]
 
 
 def test_single_node_cluster_commits_on_its_own():
@@ -386,8 +438,9 @@ def test_apply_fn_runs_outside_the_node_lock():
         assert h.wait(BOUND) and h.ok
     finally:
         node.stop()
-    # Inside apply_fn the entry is not yet counted: lastApplied moves after.
-    assert seen == [0]
+    # Inside apply_fn (index 2) the entry is not yet counted: lastApplied is
+    # 1, the no-op, and moves to 2 only after apply_fn returns.
+    assert seen == [1]
 
 
 def test_an_exception_in_apply_fn_halts_this_nodes_applier():
@@ -406,9 +459,10 @@ def test_an_exception_in_apply_fn_halts_this_nodes_applier():
         assert wait_until(lambda: node.status().role == Role.LEADER)
         assert node.propose(b"ok").wait(BOUND)
         boom, after = node.propose(b"boom"), node.propose(b"after")
-        assert wait_until(lambda: node.status().commit_index == 3)
+        # Indexes: 1 no-op, 2 ok, 3 boom, 4 after.
+        assert wait_until(lambda: node.status().commit_index == 4)
         time.sleep(0.1)
-        assert applied == [b"ok"] and node.status().last_applied == 1
+        assert applied == [b"ok"] and node.status().last_applied == 2
         assert not boom.wait(0) and not after.wait(0)  # never claimed as applied
     finally:
         node.stop()
@@ -437,7 +491,8 @@ def test_a_follower_that_was_down_catches_up_after_restore(cluster):
     for k in range(5):
         assert leader.propose(f"e{k}".encode()).wait(BOUND)
     c.wait_applied(["n1", "n2"], 5)
-    assert c.applied_count("n3") == 0 and c.nodes["n3"].status().last_log_index == 0
+    assert c.applied_count("n3") == 0
+    assert c.nodes["n3"].status().last_log_index <= 1  # at most the no-op
 
     c.net.restore("n3")
     c.wait_applied(["n3"], 5)
@@ -460,18 +515,22 @@ def test_figure7_divergent_followers_are_repaired(cluster):
     leader = c.wait_for_leader()
     assert leader.node_id == "n1" and leader.status().term == 8
 
-    # Repair happens on heartbeats alone, before any new entry is proposed.
-    want = logs["n1"]
+    # Repair happens before any client proposal: the logs converge on the
+    # leader's, including its term-8 no-op at index 11.
+    want = logs["n1"] + [8]
     assert wait_until(lambda: all(terms_of(n) == want for n in c.nodes.values())), {
         nid: terms_of(n) for nid, n in c.nodes.items()
     }
-    # A current-term entry commits everything up to it (5.4.2).
-    h = leader.propose(b"term8")
-    assert h.wait(BOUND) and h.ok and h.index == 11
-    c.wait_applied(c.ids, 11)
-    expected = [f"{i}@{t}".encode() for i, t in enumerate(want, 1)] + [b"term8"]
+    # The no-op is a current-term entry, so it alone commits 1-11 (5.4.2).
+    old = [f"{i}@{t}".encode() for i, t in enumerate(logs["n1"], 1)]
+    c.wait_applied(c.ids, 10)
     for nid in c.ids:
-        assert c.applied_data(nid) == expected
+        assert c.applied_data(nid) == old
+    h = leader.propose(b"term8")
+    assert h.wait(BOUND) and h.ok and h.index == 12
+    c.wait_applied(c.ids, 11)
+    for nid in c.ids:
+        assert c.applied_data(nid) == old + [b"term8"]
     # (f)'s old entries were overwritten, never applied.
     assert b"4@2" not in c.applied_data("n5")
 
@@ -479,52 +538,101 @@ def test_figure7_divergent_followers_are_repaired(cluster):
 # --- the Figure 8 rule (5.4.2) ----------------------------------------------
 
 
-def figure8_cluster(cluster):
+def figure8_cluster(cluster, monkeypatch):
     """3-node Figure 8. n1 led term 2 and wrote index 2; n3 led term 3 and
     wrote a different index 2. n1 wins term 4 (n3 is cut off), and n2 grants
     its vote; n2 only has index 1.
-    n2 never times out; n3 times out quickly, but is partitioned away."""
+    n2 never times out; n3 times out quickly, but is partitioned away.
+
+    n1 appends its term-4 no-op at index 3 on winning. If that reached n2 it
+    would commit everything at once (that is its job), and there would be no
+    Figure 8 situation to look at. So: one entry per RPC, and the Gate loses
+    every n1 -> n2 AppendEntries that would take n2 past index 2. n2 gets
+    the old entry; the no-op stays on n1 alone."""
+    monkeypatch.setattr("raft.node.MAX_ENTRIES_PER_RPC", 1)
     c = cluster(
         logs={"n1": [1, 2], "n2": [1], "n3": [1, 3]},
         term=3,
         per_node={"n1": LEADER_FIRST, "n2": NEVER, "n3": LEADER_FIRST},
     )
+    c.gate.cap[("n1", "n2")] = 2
     c.net.partition(["n1", "n2"], ["n3"])
     c.start()
     leader = c.wait_for_leader(among={"n1", "n2"})
     assert leader.node_id == "n1" and leader.status().term >= 4
+    assert leader.log_entries()[2] == LogEntry(leader.status().term, b"", EntryKind.NOOP)
     # n1 replicates its term-2 entry: it is now on a majority (n1, n2).
     assert wait_until(lambda: terms_of(c.nodes["n2"]) == [1, 2])
     return c
 
 
-def test_figure8_old_term_entry_on_a_majority_is_not_committed(cluster):
-    c = figure8_cluster(cluster)
+def test_figure8_old_term_entry_on_a_majority_is_not_committed(cluster, monkeypatch):
+    c = figure8_cluster(cluster, monkeypatch)
     n1, n2 = c.nodes["n1"], c.nodes["n2"]
     time.sleep(0.3)  # ~10 heartbeat periods: a counting-replicas bug commits in one
     assert n1.status().commit_index == 0 and n2.status().commit_index == 0
     assert c.applied_count("n1") == 0 and c.applied_count("n2") == 0
 
     # Figure 8(d): this is why. n1 crashes; n3 (last term 3 > 2) gets n2's
-    # vote and overwrites the "majority" entry at index 2.
+    # vote and overwrites the "majority" entry at index 2. n3's own no-op
+    # then commits n3's version, and that is what gets applied.
     c.net.drop("n1")
     c.net.heal()
-    c.wait_for_leader(among={"n3"})
-    assert wait_until(lambda: terms_of(n2) == [1, 3])
-    time.sleep(0.1)
-    assert c.applied_count("n2") == 0  # it was never applied anywhere
+    n3 = c.wait_for_leader(among={"n3"})
+    assert wait_until(lambda: terms_of(n2) == terms_of(n3) == [1, 3, n3.status().term])
+    c.wait_applied(["n2", "n3"], 2)
+    assert c.applied_data("n2") == c.applied_data("n3") == [b"1@1", b"2@3"]
+    # The term-2 entry that sat on a majority was never applied anywhere.
+    assert all(b"2@2" not in c.applied_data(nid) for nid in c.ids)
 
 
-def test_figure8_old_term_entry_commits_only_via_a_current_term_entry(cluster):
-    c = figure8_cluster(cluster)
+def test_figure8_old_term_entry_commits_only_via_a_current_term_entry(cluster, monkeypatch):
+    c = figure8_cluster(cluster, monkeypatch)
     n1 = c.nodes["n1"]
-    h = n1.propose(b"x")  # Figure 8(e): a current-term entry at index 3
-    assert h.wait(BOUND) and h.ok and h.index == 3
-    c.wait_applied(["n1", "n2"], 3)
+    time.sleep(0.1)
+    assert n1.status().commit_index == 0
+    # Figure 8(e): let n1's current-term entry (its no-op, index 3) through.
+    # No client proposes anything.
+    c.gate.cap.clear()
+    c.wait_applied(["n1", "n2"], 2)
+    assert wait_until(lambda: n1.status().commit_index == 3)
     # Committing index 3 committed indexes 1 and 2 indirectly (Log Matching).
     for nid in ("n1", "n2"):
-        assert c.applied_data(nid) == [b"1@1", b"2@2", b"x"]
+        assert c.applied_data(nid) == [b"1@1", b"2@2"]  # the no-op is not applied
     assert c.applied_count("n3") == 0
+
+
+# --- the no-op (section 8) --------------------------------------------------
+
+
+def test_old_term_entries_commit_after_a_leader_change_with_no_new_proposals(cluster):
+    # A term-1 leader replicated entries 1-2 to n1 and n2 (a majority) and
+    # crashed before committing them: they are on a majority, and
+    # commitIndex is 0 everywhere. NO client proposes anything in this test.
+    # Without the no-op a new leader could never commit them (the Figure 8
+    # rule needs a current-term entry), and this test would time out.
+    c = cluster(logs={"n1": [1, 1], "n2": [1, 1], "n3": [1]}, term=1)
+    assert all(n.status().commit_index == 0 for n in c.nodes.values())
+    c.start()
+
+    first = c.wait_for_leader()  # the leader change: someone leads term >= 2
+    assert first.node_id in ("n1", "n2")  # n3's log is stale
+    c.wait_applied(c.ids, 2)
+    for nid in c.ids:
+        assert c.applied_data(nid) == [b"1@1", b"2@1"]
+
+    # The leader changes again, still with no proposals. The next leader's
+    # own no-op commits, and every node applies up to the end of its log.
+    c.net.drop(first.node_id)
+    second = c.wait_for_leader(among=set(c.ids) - {first.node_id}, above_term=first.status().term)
+    c.net.restore(first.node_id)
+    assert wait_until(
+        lambda: all(n.status().last_applied == second.status().last_log_index for n in c.nodes.values())
+    ), {nid: n.status() for nid, n in c.nodes.items()}
+    kinds = [e.kind for e in second.log_entries()]
+    assert kinds[2:] and all(k is EntryKind.NOOP for k in kinds[2:])  # only no-ops were added
+    for nid in c.ids:
+        assert c.applied_data(nid) == [b"1@1", b"2@1"]  # no-ops never reach apply_fn
 
 
 # --- Leader Completeness ----------------------------------------------------
@@ -544,10 +652,10 @@ def test_a_committed_entry_survives_the_leader_being_dropped(cluster):
     # b has an empty log, so only a can win (b votes for a; a refuses b).
     new = c.wait_for_leader(among={a, b}, above_term=leader.status().term)
     assert new.node_id == a
-    assert [e.data for e in new.log_entries()][:1] == [b"x"]
+    assert new.log_entries()[hx.index - 1] == LogEntry(hx.term, b"x")
 
     hy = new.propose(b"y")
-    assert hy.wait(BOUND) and hy.ok and hy.index == 2
+    assert hy.wait(BOUND) and hy.ok
     c.wait_applied([a, b], 2)
     assert c.applied_data(a) == c.applied_data(b) == [b"x", b"y"]
 
@@ -560,12 +668,13 @@ def test_propose_on_a_follower_fails_with_a_leader_hint(cluster):
     c.wait_for_leader()
     f = c.nodes["n2"]
     assert wait_until(lambda: f.status().leader_id == "n1")
+    assert wait_until(lambda: f.status().last_log_index == 1)  # the leader's no-op
 
     h = f.propose(b"nope")
     assert h.wait(0)  # resolved immediately, no waiting
     assert h.outcome is Outcome.NOT_LEADER and not h.ok
     assert h.leader_hint == "n1"
-    assert f.status().last_log_index == 0  # nothing was appended
+    assert f.status().last_log_index == 1  # nothing was appended
 
 
 def test_propose_with_no_known_leader_has_no_hint():
@@ -584,22 +693,28 @@ def test_a_proposal_whose_entry_is_overwritten_never_succeeds(cluster):
     assert wait_until(lambda: all(n.status().leader_id == "n1" for n in c.nodes.values()))
     old_term = old.status().term
 
+    # Every node holds n1's no-op (index 1) before the cut.
+    assert wait_until(lambda: all(n.status().last_log_index == 1 for n in c.nodes.values()))
+
     # Cut the leader off. It still believes it leads, so it accepts x at
-    # index 1, which can never reach a majority.
+    # index 2, which can never reach a majority.
     c.net.partition(["n1"], ["n2", "n3"])
     hx = old.propose(b"x")
-    assert hx.index == 1 and not hx.wait(0.1)  # pending, not resolved
+    assert hx.index == 2 and not hx.wait(0.1)  # pending, not resolved
 
+    # The new leader's no-op takes index 2 (x's slot) in a later term.
     new = c.wait_for_leader(among={"n2", "n3"}, above_term=old_term)
     hy = new.propose(b"y")
-    assert hy.wait(BOUND) and hy.ok and hy.index == 1  # the same index as x
+    assert hy.wait(BOUND) and hy.ok
 
     c.net.heal()
     assert hx.wait(BOUND), "x's handle never resolved"
     assert not hx.ok and hx.outcome in (Outcome.LEADERSHIP_LOST, Outcome.OVERWRITTEN)
     c.wait_applied(c.ids, 1)
     for nid in c.ids:
-        assert c.applied_data(nid)[:1] == [b"y"]  # x was overwritten everywhere
+        assert c.applied_data(nid) == [b"y"]  # x was never applied anywhere
+    # ...and n1's slot 2 now holds a different term: x is gone for good.
+    assert wait_until(lambda: terms_of(c.nodes["n1"])[1:2] == [new.status().term])
 
 
 def test_stopping_a_leader_fails_its_pending_proposals(cluster):
@@ -649,34 +764,38 @@ def test_state_machine_safety_under_drops_and_partitions(cluster, seed):
                 proposals.append((data, node.propose(data)))
         time.sleep(rng.uniform(0.005, 0.02))
 
-    # Heal everything and keep proposing until every node has applied an
-    # acknowledged entry. ONE final entry is not enough: if leadership moves
-    # right after it commits, the new leader may not know that commitIndex
-    # yet, and (no no-op on election, R9) commits nothing until it gets an
-    # entry of its own term. That is a liveness gap, not a safety one.
+    # Heal everything; once one more entry is acknowledged, every node must
+    # reach it. If leadership moves right after it commits, the new leader
+    # may not know that commitIndex yet; only its no-op (R9) lets it commit
+    # again without further proposals. So this converges only if the no-op
+    # does its job.
     c.net.heal()
     for nid in c.ids:
         c.net.restore(nid)
 
-    def converged():
+    def final_applied():
         leader = c.wait_for_leader()
         h = leader.propose(b"final")
         proposals.append((b"final", h))
-        return (
-            h.wait(1.0)
-            and h.ok
-            and wait_until(lambda: all(c.applied_count(n) >= h.index for n in c.ids), timeout=1.0)
-        )
+        return h.wait(1.0) and h.ok
 
-    assert wait_until(converged, timeout=15.0, interval=0.0), {
-        nid: node.status() for nid, node in c.nodes.items()
-    }
+    assert wait_until(final_applied, timeout=10.0, interval=0.0)
+    last = proposals[-1][1].index
+    assert wait_until(
+        lambda: all(n.status().last_applied >= last for n in c.nodes.values()), timeout=10.0
+    ), {nid: node.status() for nid, node in c.nodes.items()}
     c.stop()
 
     seqs = {nid: list(c.applied[nid]) for nid in c.ids}
-    # Each node applies indexes 1, 2, 3, ... in order, each exactly once.
+    # Each node hands apply_fn exactly its committed COMMAND entries, in index
+    # order, each once: the applied indexes are the non-no-op indexes of its
+    # own log up to lastApplied (no-ops are the only numbers skipped).
     for nid, seq in seqs.items():
-        assert [i for i, _ in seq] == list(range(1, len(seq) + 1)), nid
+        node = c.nodes[nid]
+        log_ = node.log_entries()[: node.status().last_applied]
+        commands = [i for i, e in enumerate(log_, 1) if e.kind is EntryKind.COMMAND]
+        assert [i for i, _ in seq] == commands, nid
+        assert [d for _, d in seq] == [log_[i - 1].data for i in commands], nid
     # No index is ever applied with two different values, on any two nodes.
     value_at = {}
     for nid, seq in seqs.items():
