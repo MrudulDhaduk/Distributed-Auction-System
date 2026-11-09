@@ -250,6 +250,24 @@ auctions instead of a timer, why the LLM model was switched away from the
 hybrid `qwen3:4b`, timeout sizing, etc.), see
 [docs/design-notes.md](docs/design-notes.md) rather than a copy of it here.
 
+## Dashboard, chaos, checker, demo
+
+See [docs/testing-and-chaos.md](docs/testing-and-chaos.md) and
+[docs/stress-results.md](docs/stress-results.md).
+
+```powershell
+.\scripts\demo.ps1                                        # LLM + 3 nodes + dashboard, scripted auction,
+                                                          # leader kill, restart, then PASS/FAIL per property
+.venv\Scripts\python.exe scripts\dashboard.py             # live status of a run_cluster.ps1 cluster
+.venv\Scripts\python.exe scripts\chaos.py --duration 600  # 10-minute chaos run (prints its seed)
+.venv\Scripts\python.exe -m checker runs\chaos-<seed>-<time>   # re-check a recorded run
+.venv\Scripts\python.exe scripts\stress.py all            # throughput/latency + 3x20 leader kills
+```
+
+Run output goes to `runs\` (gitignored). The demo uses the
+`run_cluster.ps1` ports, so do not run both at once. Chaos and stress use
+50081-50083 / 50091-50093 / 50059.
+
 ## Running the test suite
 
 With the venv active:
