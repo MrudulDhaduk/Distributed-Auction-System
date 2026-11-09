@@ -10,7 +10,7 @@ exits (the in-memory storage the tests use).
 
 Every change of role or term is logged as one line, e.g.
     12:00:01.234 [n2] term 4 FOLLOWER -> CANDIDATE (was term 3): election timeout
-scripts/run_cluster.ps1 starts three of these in separate windows.
+scripts/run_cluster.ps1 -RaftOnly starts three of these in separate windows.
 """
 
 import argparse
