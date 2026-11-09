@@ -164,7 +164,16 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
     def GetAuction(
         self, request: auction_pb2.GetAuctionRequest, context
     ) -> auction_pb2.GetAuctionResponse:
-        """Read one auction. Snapshot under the lock, build outside it."""
+        """Read one auction. Snapshot under the lock, build outside it.
+
+        M2: leader only, after a read barrier (RaftNode.read_index, section
+        8): this node is confirmed leader and has applied everything that
+        was committed before the call began, so the local state read below
+        is not stale. A follower gets NOT_LEADER, like a write.
+        (docs/decisions.md, A15.)
+        """
+        with raft_errors(context):
+            self._replicator.read_barrier()
         with self._state.lock:
             auction = self._state.auctions.get(request.auction_id)
             if auction is not None:
@@ -213,7 +222,10 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
     def ListAuctions(
         self, request: auction_pb2.ListAuctionsRequest, context
     ) -> auction_pb2.ListAuctionsResponse:
-        """List auctions, open only unless include_closed is set."""
+        """List auctions, open only unless include_closed is set. Leader
+        only, after a read barrier, as GetAuction."""
+        with raft_errors(context):
+            self._replicator.read_barrier()
         summaries = []
         with self._state.lock:
             for auction_id, auction in self._state.auctions.items():

@@ -52,16 +52,22 @@ class LoseReplies(Transport):
     REPLIES to that node are lost after the receiver has handled the
     request. The entry gets replicated, but the sender never learns it, so
     its handler cannot know whether its command committed: the textbook
-    "unknown outcome"."""
+    "unknown outcome".
+
+    drop(args): AppendEntries REQUESTS for which it returns true are lost
+    before delivery (used to keep a follower from learning a commitIndex)."""
 
     def __init__(self, net):
         self._net = net
         self.lose = set()
+        self.drop = lambda args: False
 
     def request_vote(self, to, args):
         return self._net.request_vote(to, args)
 
     def append_entries(self, to, args):
+        if self.drop(args):
+            raise TransportError(f"request {args.from_id} -> {to} lost")
         reply = self._net.append_entries(to, args)
         if args.from_id in self.lose:
             raise TransportError(f"reply {to} -> {args.from_id} lost")

@@ -22,7 +22,7 @@ import contextlib
 import grpc
 
 from common.wire import LEADER_ADDR_METADATA_KEY, LEADER_ID_METADATA_KEY
-from replication.replicator import NotLeaderError, OutcomeUnknownError
+from replication.replicator import NotLeaderError, OutcomeUnknownError, ReadNotConfirmedError
 
 
 def abort_not_leader(context, e: NotLeaderError):
@@ -35,6 +35,9 @@ def abort_not_leader(context, e: NotLeaderError):
 
 
 def abort_outcome_unknown(context, e: OutcomeUnknownError):
+    if isinstance(e, ReadNotConfirmedError):
+        # A read changes nothing: there is no outcome to be unsure about.
+        context.abort(grpc.StatusCode.UNAVAILABLE, f"{e}; retry")
     context.abort(
         grpc.StatusCode.UNAVAILABLE,
         f"outcome unknown, retry with the same (client_id, seq): {e}",

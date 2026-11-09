@@ -15,7 +15,8 @@ moment ago may simply not have arrived yet. So an unrecognised token is
 only refused by the LEADER; a follower cannot tell "unknown" from "not
 here yet", and redirects instead (FAILED_PRECONDITION + leader-addr, the
 same answer it gives every RPC). A missing token is refused everywhere:
-there is nothing to look up. (docs/decisions.md, A4.)
+there is nothing to look up. (docs/decisions.md, A4.) The leader, too,
+looks again after a read barrier before refusing (see _resolve; A16).
 
 Only unary-unary RPCs are handled. Every RPC in auction.proto is
 unary-unary today; a streaming RPC added later would need its own wrapping
@@ -26,8 +27,7 @@ an oversight.
 import grpc
 
 from common.wire import TOKEN_METADATA_KEY
-from replication.replicator import NotLeaderError
-from server.errors import abort_not_leader
+from server.errors import raft_errors
 
 EXEMPT_METHODS = frozenset({
     "/auction.AuthService/Login",
@@ -56,20 +56,34 @@ def _reject(context, details):
 
 class AuthInterceptor(grpc.ServerInterceptor):
     def __init__(self, session_store, replicator=None):
-        """replicator: this node's RaftReplicator, to ask "am I the
-        leader?". None = a cluster of one (M1 unit tests): always leader."""
+        """replicator: this node's RaftReplicator, for "am I the leader?"
+        and the read barrier. None = a cluster of one (M1 unit tests)."""
         self._session_store = session_store
         self._replicator = replicator
 
-    def _not_leader(self):
-        """The NotLeaderError to redirect with, or None if we are leader."""
-        if self._replicator is None:
-            return None
-        try:
-            self._replicator.check_leader()
-        except NotLeaderError as e:
-            return e
-        return None
+    def _resolve(self, token, context) -> str:
+        """The username for token, or abort the call.
+
+        Known here: done, no Raft round (the common case).
+        Unknown here: on a follower, redirect (FAILED_PRECONDITION). On the
+        leader, first run the read barrier: a NEW leader may not have
+        applied every committed Login yet, and the barrier makes it (it
+        waits until this term's no-op commits, then for lastApplied to
+        catch up). Only if the token is still unknown after that is it
+        refused. A barrier that fails is UNAVAILABLE ("retry"), never
+        UNAUTHENTICATED: we could not find out, so we must not say no.
+        """
+        username = self._session_store.validate(token)
+        if username is not None:
+            return username
+        if self._replicator is not None:
+            with raft_errors(context):
+                self._replicator.check_leader()
+                self._replicator.read_barrier()
+            username = self._session_store.validate(token)
+            if username is not None:
+                return username
+        _reject(context, "missing or invalid session token")
 
     def intercept_service(self, continuation, handler_call_details):
         if handler_call_details.method in EXEMPT_METHODS:
@@ -77,16 +91,8 @@ class AuthInterceptor(grpc.ServerInterceptor):
 
         metadata = dict(handler_call_details.invocation_metadata or [])
         token = metadata.get(TOKEN_METADATA_KEY)
-        username = self._session_store.validate(token) if token else None
 
-        if username is None:
-            not_leader = self._not_leader() if token else None
-            if not_leader is not None:
-                def redirect(request, context):
-                    abort_not_leader(context, not_leader)
-
-                return grpc.unary_unary_rpc_method_handler(redirect)
-
+        if not token:
             def reject(request, context):
                 _reject(context, "missing or invalid session token")
 
@@ -94,7 +100,10 @@ class AuthInterceptor(grpc.ServerInterceptor):
 
         handler = continuation(handler_call_details)
 
+        # The lookup runs inside the call, not here: the read barrier
+        # blocks, and its failures abort through the call's context.
         def authenticated_behavior(request, context):
+            username = self._resolve(token, context)
             return handler.unary_unary(request, _ContextWithUsername(context, username))
 
         return grpc.unary_unary_rpc_method_handler(

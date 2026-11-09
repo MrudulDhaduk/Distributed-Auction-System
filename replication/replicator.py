@@ -33,7 +33,7 @@ import itertools
 import threading
 from typing import Optional
 
-from raft.node import RaftNode, Role
+from raft.node import RaftNode, ReadOutcome, Role
 from raft.proposal import Outcome, Proposal
 from replication import codec
 from replication.state_machine import Applied, StateMachine
@@ -57,6 +57,12 @@ class NotLeaderError(Exception):
 
 class OutcomeUnknownError(Exception):
     pass
+
+
+class ReadNotConfirmedError(OutcomeUnknownError):
+    """read_barrier() could not confirm leadership in time (or lost it).
+    Nothing was read; the client retries. A subclass so every caller that
+    handles "retry later" handles this too."""
 
 
 class RaftReplicator:
@@ -101,6 +107,18 @@ class RaftReplicator:
             return proposal.result
         raise OutcomeUnknownError(f"{proposal.outcome.value} at index {proposal.index}")
 
+    def read_barrier(self) -> int:
+        """RaftNode.read_index (section 8): on return, this node is a
+        leader that a majority still followed after the call began, and it
+        has applied every entry committed before the call began. Reading
+        local state now is linearizable. Returns the read index."""
+        r = self.node.read_index(self._timeout)
+        if r.ok:
+            return r.index
+        if r.outcome is ReadOutcome.NOT_LEADER:
+            raise self._not_leader(r.leader_hint)
+        raise ReadNotConfirmedError(f"read not confirmed ({r.outcome.value})")
+
 
 class LocalReplicator:
     """A cluster of one, without Raft: always the leader, applies at once.
@@ -128,3 +146,7 @@ class LocalReplicator:
 
     def submit(self, command, client_id: str = "", seq: int = 0) -> Applied:
         return self.propose(command, client_id, seq).result
+
+    def read_barrier(self) -> int:
+        """A cluster of one is always up to date with itself."""
+        return 0
