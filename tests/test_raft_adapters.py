@@ -18,7 +18,7 @@ from raft.messages import (
     RequestVoteReply,
 )
 from raft.node import RaftNode, Role
-from raft.run_node import parse_peers
+from raft.run_node import build_parser, make_storage, parse_peers
 from raft.servicer import RaftServicer
 from raft.transport import InMemoryTransport
 
@@ -99,3 +99,20 @@ def test_parse_peers():
 def test_parse_peers_rejects_malformed_input(bad):
     with pytest.raises(ValueError):
         parse_peers(bad)
+
+
+def test_runner_storage_is_in_memory_unless_a_data_dir_is_given(data_dir):
+    import os
+
+    from raft.file_storage import FileStorage
+    from raft.storage import MemoryStorage
+
+    assert build_parser().parse_args(["--id", "n1", "--port", "1"]).data_dir is None
+    assert isinstance(make_storage(None), MemoryStorage)
+
+    args = build_parser().parse_args(["--id", "n1", "--port", "1", "--data-dir", os.path.join(data_dir, "n1")])
+    s = make_storage(args.data_dir)
+    try:
+        assert isinstance(s, FileStorage) and os.path.isdir(args.data_dir)
+    finally:
+        s.close()

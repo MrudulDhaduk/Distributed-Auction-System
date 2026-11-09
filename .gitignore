@@ -221,3 +221,6 @@ Learning/Threading.py
 CLAUDE.md
 My words.txt
 papers/
+
+# Raft node data directories (run_node --data-dir data/n1 ...)
+data/

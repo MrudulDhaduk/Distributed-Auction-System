@@ -1,7 +1,12 @@
 """Run one Raft node as its own process.
 
     python -m raft.run_node --id n1 --port 50061 \
-        --peers n2=127.0.0.1:50062,n3=127.0.0.1:50063
+        --peers n2=127.0.0.1:50062,n3=127.0.0.1:50063 --data-dir data/n1
+
+With --data-dir, currentTerm, votedFor and log[] are kept on disk
+(raft/file_storage.py) and a restarted node recovers them. One directory
+per node, never shared. Without it, everything is lost when the process
+exits (the in-memory storage the tests use).
 
 Every change of role or term is logged as one line, e.g.
     12:00:01.234 [n2] term 4 FOLLOWER -> CANDIDATE (was term 3): election timeout
@@ -24,7 +29,9 @@ from raft.node import (
     DEFAULT_HEARTBEAT_INTERVAL,
     RaftNode,
 )
+from raft.file_storage import CorruptStorageError, FileStorage
 from raft.servicer import RaftServicer
+from raft.storage import MemoryStorage
 from raft.transport import GrpcTransport
 
 
@@ -50,9 +57,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--election-timeout-min", type=float, default=DEFAULT_ELECTION_TIMEOUT[0])
     p.add_argument("--election-timeout-max", type=float, default=DEFAULT_ELECTION_TIMEOUT[1])
     p.add_argument("--heartbeat", type=float, default=DEFAULT_HEARTBEAT_INTERVAL)
+    p.add_argument(
+        "--data-dir",
+        default=None,
+        help="this node's own directory for term, vote and log (default: in memory, lost on exit)",
+    )
     p.add_argument("--seed", type=int, default=None, help="seed the timeout RNG (default: random)")
     p.add_argument("--verbose", action="store_true", help="also log lost RPCs")
     return p
+
+
+def make_storage(data_dir):
+    """FileStorage on `data_dir` (created if missing), or MemoryStorage."""
+    return FileStorage(data_dir) if data_dir else MemoryStorage()
 
 
 def setup_logging(verbose: bool) -> logging.handlers.QueueListener:
@@ -86,6 +103,20 @@ def main(argv=None):
     listener = setup_logging(args.verbose)
     log = logging.getLogger("raft.run_node")
 
+    try:
+        storage = make_storage(args.data_dir)
+    except CorruptStorageError as e:
+        # Never start on damaged state: a node that forgot a vote or an
+        # acknowledged entry can break safety (raft/file_storage.py).
+        listener.stop()
+        raise SystemExit(f"error: {args.data_dir}: {e}")
+    last = storage.last_index()
+    log.info(
+        "[%s] storage %s: term %d, votedFor %s, %d log entries (last term %d)",
+        args.id, args.data_dir or "(memory)", storage.term, storage.voted_for,
+        last, storage.term_at(last),
+    )
+
     transport = GrpcTransport(peers)
     node = RaftNode(
         args.id,
@@ -95,6 +126,7 @@ def main(argv=None):
         heartbeat_interval=args.heartbeat,
         rng=random.Random(args.seed),
         observer=lambda event: log.info(event.describe()),
+        storage=storage,
     )
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
@@ -117,6 +149,8 @@ def main(argv=None):
         node.stop()
         server.stop(grace=0.5)
         transport.close()
+        if isinstance(storage, FileStorage):
+            storage.close()
         listener.stop()
 
 
