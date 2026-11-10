@@ -54,13 +54,14 @@ def choose_bid(rng, high: int, sent: set, equal_chance: float = EQUAL_BID_CHANCE
 
 
 class BackgroundBidder(threading.Thread):
-    def __init__(self, user, addrs, board: Board, auctions, record, stop: threading.Event, seed):
+    def __init__(self, user, addrs, board: Board, auctions, record, stop: threading.Event, seed, after_pay=None):
         super().__init__(name=f"bg-{user}", daemon=True)
         self.user = user
         self.addrs = list(addrs)
         self.board = board
         self.auctions = tuple(auctions)
         self.record = record          # record(name, client, op, call, **fields) -> record dict
+        self.after_pay = after_pay    # after_pay(client, auction_id): e.g. read and log the escrow
         self.stop_evt = stop
         self.rng = random.Random(f"bg:{seed}:{user}")
         self.sent = {a: set() for a in self.auctions}
@@ -114,6 +115,11 @@ class BackgroundBidder(threading.Thread):
                 amount = auction.current_high_bid
                 self.record(self.user, client, "pay", lambda: client.pay(a, amount),
                             auction_id=a, amount=amount)
+                if self.after_pay is not None:
+                    try:
+                        self.after_pay(client, a)
+                    except (ClusterUnavailable, grpc.RpcError):
+                        pass          # the escrow is still HELD; the seller's step reads it later
 
 
 class StatusLine(threading.Thread):

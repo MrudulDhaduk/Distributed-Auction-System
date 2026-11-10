@@ -31,6 +31,15 @@ def test_event_log_writes_one_json_object_per_line_with_t_and_kind(tmp_path):
     assert round(lines[0]["t"], 3) == lines[0]["t"]   # 3 decimals at most
 
 
+def test_an_event_can_be_stamped_with_the_time_it_happened(tmp_path):
+    path = tmp_path / "events.jsonl"
+    log = EventLog(str(path), t0=time.monotonic() - 10.0)    # the run started 10 s ago
+    log.write("close", at=time.monotonic() - 6.0, auction_id=2)  # it happened 6 s ago, logged now
+    log.close()
+    (line,) = read_lines(path)
+    assert 3.9 <= line["t"] <= 4.1                       # 10 - 6 seconds into the run, not "now"
+
+
 def test_event_log_ignores_writes_after_close(tmp_path):
     path = tmp_path / "events.jsonl"
     log = EventLog(str(path))

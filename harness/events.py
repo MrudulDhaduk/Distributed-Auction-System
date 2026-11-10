@@ -46,11 +46,15 @@ class EventLog:
     def now(self) -> float:
         return round(time.monotonic() - self._t0, 3)
 
-    def write(self, kind: str, **fields):
+    def write(self, kind: str, at=None, **fields):
+        """`at`: a time.monotonic() value for when the thing HAPPENED, if that is
+        earlier than now (a close the demo only noticed later). Default: now.
+        The file is then not in time order; the replay sorts by "t"."""
         with self._lock:
             if self._closed:
                 return
-            line = json.dumps({"t": self.now(), "kind": kind, **fields}, default=str)
+            t = self.now() if at is None else round(at - self._t0, 3)
+            line = json.dumps({"t": t, "kind": kind, **fields}, default=str)
             self._f.write(line + "\n")
 
     def flush(self):

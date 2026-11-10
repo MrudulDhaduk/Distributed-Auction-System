@@ -64,6 +64,11 @@ SUMMARY_WAIT_SECONDS = 60
 KILL_STALL_WINDOW = 15.0
 
 
+def mono_of_wall(wall_seconds: float) -> float:
+    """The time.monotonic() value that corresponds to a wall-clock time (epoch seconds)."""
+    return time.monotonic() - (time.time() - wall_seconds)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Scripted auction with background bidders, leader kills, then the checker.")
     p.add_argument("--pause", type=float, default=2.0)
@@ -130,12 +135,20 @@ def main(argv=None) -> int:
     def bid(name, amount):
         return write(name, "bid", lambda: users[name].place_bid(AUCTION, amount), auction_id=AUCTION, amount=amount)
 
-    def show_escrow(name, label, auction_id=AUCTION):
-        e = users[name].get_escrow(auction_id).escrow
-        print(f"  {label}: status {e.status}, amount {e.amount}, payer {e.payer or '-'}, seller {e.seller}, "
-              f"payment_ref {e.payment_ref or '-'}, settlement_ref {e.settlement_ref or '-'}", flush=True)
+    def log_escrow_from(client, auction_id):
+        """Read the escrow record through `client` and log it, without printing."""
+        e = client.get_escrow(auction_id).escrow
         log.write("escrow", auction_id=auction_id, status=e.status, amount=e.amount, payer=e.payer,
                   seller=e.seller, payment_ref=e.payment_ref, settlement_ref=e.settlement_ref)
+        return e
+
+    def log_escrow(name, auction_id):
+        return log_escrow_from(users[name], auction_id)
+
+    def show_escrow(name, label, auction_id=AUCTION):
+        e = log_escrow(name, auction_id)
+        print(f"  {label}: status {e.status}, amount {e.amount}, payer {e.payer or '-'}, seller {e.seller}, "
+              f"payment_ref {e.payment_ref or '-'}, settlement_ref {e.settlement_ref or '-'}", flush=True)
         return e
 
     def kill_leader(why):
@@ -223,7 +236,7 @@ def main(argv=None) -> int:
             bg_threads.append(BackgroundBidder(
                 name, cluster.client_addrs(), board, sorted(BACKGROUND),
                 record=lambda n, client, op, call, **f: record(n, client, op, call, True, **f),
-                stop=bg_stop, seed=run_dir))
+                stop=bg_stop, seed=run_dir, after_pay=log_escrow_from))
         for thread in bg_threads:
             thread.start()
         status_line = StatusLine(lambda: history.snapshot(), monitor.view, every=5.0)
@@ -272,7 +285,9 @@ def main(argv=None) -> int:
         for aid in AUCTIONS:
             auction = users["nisarg"].get_auction(aid)
             if auction is not None and auction.closed:
-                log.write("close", auction_id=aid, winner=auction.winner, winning_bid=auction.current_high_bid)
+                # stamped with the scheduled close time, not the time the demo noticed it
+                log.write("close", at=mono_of_wall(auction.close_time / 1e6),
+                          auction_id=aid, winner=auction.winner, winning_bid=auction.current_high_bid)
         # The background bidders stop by themselves once their auctions are closed and
         # settled. Give them time to do that before the stop signal, so no winner's
         # payment is cut off.
@@ -336,6 +351,7 @@ def main(argv=None) -> int:
                 continue
             call = users["nisarg"].release_escrow if op == "release" else users["nisarg"].refund_escrow
             write("nisarg", op, lambda aid=aid, call=call: call(aid), auction_id=aid)
+            log_escrow("nisarg", aid)
 
         restart(leader)
 
