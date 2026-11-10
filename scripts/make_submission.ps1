@@ -13,7 +13,9 @@
 # included folder is still left out:
 #   .venv, data, __pycache__, *.pyc/*.pyo, .git, papers, CLAUDE.md,
 #   CLAUDE.old.md, run output (runs, logs), dist, .pytest_cache.
-# MyNotes\, Learning\ and Documents\ are personal study notes: not included.
+# docsiva-prep.md and docseflection-facts.md are personal notes that live in
+# docs\ but do not ship. MyNotes\, Learning\ and Documents\ are personal study
+# notes too, except Documents\Problem_Statement.md, which is included on purpose.
 #
 # Entries are written with forward slashes under one top folder
 # (Distributed-Auction-System/...). Compress-Archive is not used because on
@@ -34,17 +36,21 @@ $includeDirs = @(
     "llm_server", "raft", "replication", "server", "sessions",
     "proto", "scripts", "docs", "tests"
 )
-$includeFiles = @("README.md", "requirements.txt", "pytest.ini", "LICENSE")
+$includeFiles = @("README.md", "requirements.txt", "pytest.ini", "LICENSE",
+                  "Documents/Problem_Statement.md")
 
 $excludeSegments = @(".venv", "data", "__pycache__", ".git", "papers",
                      "runs", "logs", "dist", ".pytest_cache")
 $excludeNames = @("CLAUDE.md", "CLAUDE.old.md")
+# Repo-relative paths (forward slashes) that stay out of the zip.
+$excludePaths = @("docs/viva-prep.md", "docs/reflection-facts.md")
 $excludeExtensions = @(".pyc", ".pyo")
 
 function Test-Excluded([string]$rel) {
     # $rel uses forward slashes, relative to the repo root.
     $parts = $rel.Split("/")
     $name = $parts[-1]
+    if ($excludePaths -contains $rel) { return $true }
     if ($excludeNames -contains $name) { return $true }
     if ($excludeExtensions -contains [System.IO.Path]::GetExtension($name).ToLower()) { return $true }
     for ($i = 0; $i -lt $parts.Length - 1; $i++) {
