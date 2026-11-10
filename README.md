@@ -222,8 +222,34 @@ assistant answer 1.14 s, close to summary visible 5.56 s, price trends 2.28 s.
 At `-Pause 4` the same run is longer by about 3.5 s per step. Minute-by-minute
 script: [docs/demo-runsheet.md](docs/demo-runsheet.md).
 
+Run with the event log on 2026-11-10 at `-Pause 4` (the presenting speed): all
+ten properties PASS, whole run 125.16 s. Its output and its replay are in
+`runs\demo-20261110-143237` (local only).
+
 Do not run the demo and `run_cluster.ps1` at the same time: they use the same
 ports.
+
+### Replay a demo run
+
+Every demo run writes `runs\demo-<time>\events.jsonl`: one line per step,
+client write, kill, restart, election, close, summary, escrow change and
+checker result, each stamped with its time. The replay turns that file into one
+self-contained HTML page (data, CSS and JavaScript inside it; no server, no
+internet):
+
+```powershell
+.venv\Scripts\python.exe scripts\replay.py runs\demo-<time>
+```
+
+Open `runs\demo-<time>\replay.html` in a browser. Space plays and pauses, the
+left and right arrows jump to the previous or next step, kill, election or
+escrow change, the speed buttons set 0.5x to 5x, and the timeline jumps to any
+marker. Dragging the slider rebuilds the state at that time from the events.
+The page opens with a banner saying it is a replay, so it cannot be mistaken
+for a live system. The end of the run shows the checker's result.
+
+The replay is built by `scripts\replay.py`, and the state is computed there and
+tested in `tests\test_replay.py`. The page only displays it.
 
 ---
 
@@ -404,6 +430,7 @@ there.
 - **`ProcessBusinessRequest` takes an untyped JSON payload,** validated field by
   field on the server. It dispatches to the typed handlers behind the same auth
   and leader rules; the typed RPCs are the primary API (decisions.md C19).
+- Chaos runs are seeded but not deterministic, because they use real processes and wall-clock time. A deterministic simulator on a virtual clock is the natural next step.
 
 ---
 
