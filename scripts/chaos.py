@@ -32,11 +32,11 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from harness import run as R  # noqa: E402
-from harness.procs import ROOT, LocalCluster  # noqa: E402
-from harness.schedule import describe, make_schedule  # noqa: E402
-from harness.status import StatusMonitor, StatusPoller  # noqa: E402
-from harness.workload import Workload  # noqa: E402
+from harness import run as R
+from harness.procs import ROOT, LocalCluster
+from harness.schedule import describe, make_schedule
+from harness.status import StatusMonitor, StatusPoller
+from harness.workload import Workload
 
 
 def main(argv=None) -> int:
@@ -52,6 +52,9 @@ def main(argv=None) -> int:
                    help="client give_up_after, seconds. Below the longest outage (8 s) on purpose, so "
                         "majority-loss episodes produce real 'unknown' outcomes for the checker")
     p.add_argument("--no-llm", action="store_true", help="do not start the LLM server")
+    p.add_argument("--fake-llm", action="store_true",
+                   help="start harness/fake_llm.py (canned answers, no model) instead of the real LLM "
+                        "server: exercises the summary path under faults without the model's CPU load")
     p.add_argument("--llm-port", type=int, default=50059)
     p.add_argument("--base-peer", type=int, default=50081)
     p.add_argument("--base-client", type=int, default=50091)
@@ -79,7 +82,7 @@ def main(argv=None) -> int:
             f.flush()
 
     cluster = LocalCluster(run_dir, base_peer=args.base_peer, base_client=args.base_client,
-                           llm_port=None if args.no_llm else args.llm_port)
+                           llm_port=None if args.no_llm else args.llm_port, fake_llm=args.fake_llm)
     poller = StatusPoller(cluster.peer_addrs())
     monitor = StatusMonitor(poller, interval=0.05, on_event=lambda e: say(e, events_log))
     workload = None

@@ -282,9 +282,12 @@ class NodeProc(_Proc):
 
 
 class LlmProc(_Proc):
-    def __init__(self, port: int, log_path: str):
+    def __init__(self, port: int, log_path: str, fake: bool = False):
+        """fake: run harness/fake_llm.py (canned answers, no model) instead of
+        the real llm_server/serve.py."""
         self.port = port
-        super().__init__("llm", [python_exe(), "-c", f"from llm_server.serve import serve; serve({port})"], log_path)
+        module = "harness.fake_llm" if fake else "llm_server.serve"
+        super().__init__("llm", [python_exe(), "-c", f"from {module} import serve; serve({port})"], log_path)
 
 
 class LocalCluster:
@@ -297,7 +300,7 @@ class LocalCluster:
     a port nobody listens on and descriptions degrade to "" (A10)."""
 
     def __init__(self, run_dir, *, ids=("n1", "n2", "n3"), base_peer=50081, base_client=50091,
-                 llm_port=50059, election=None, heartbeat=None):
+                 llm_port=50059, election=None, heartbeat=None, fake_llm=False):
         self.run_dir = os.path.abspath(run_dir)
         self.specs = [
             NodeSpec(nid, base_peer + i, base_client + i,
@@ -305,7 +308,7 @@ class LocalCluster:
             for i, nid in enumerate(ids)
         ]
         llm_addr = f"{HOST}:{llm_port if llm_port else 1}"
-        self.llm = LlmProc(llm_port, os.path.join(self.run_dir, "logs", "llm.log")) if llm_port else None
+        self.llm = LlmProc(llm_port, os.path.join(self.run_dir, "logs", "llm.log"), fake=fake_llm) if llm_port else None
         self.nodes = {
             s.node_id: NodeProc(s, [p for p in self.specs if p is not s], llm_addr, election, heartbeat)
             for s in self.specs

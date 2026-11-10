@@ -84,7 +84,7 @@ def record_write(history, name, user, client, op, call, **fields) -> dict:
     monotonic latency. The seq is read from the request actually sent
     (client.sent is ClusterClient's public attempt trace)."""
     start, m0 = now_us(), time.monotonic()
-    response, high_bid, high_bidder = None, 0, ""
+    response, high_bid, high_bidder, reference = None, 0, "", ""
     try:
         response = call()
         outcome = "ok" if response.result.success else "rejected"
@@ -98,9 +98,11 @@ def record_write(history, name, user, client, op, call, **fields) -> dict:
     client.sent.clear()  # the attempt trace; not needed, and it would grow all run
     if op == "bid" and response is not None:
         high_bid, high_bidder = response.current_high_bid, response.current_high_bidder
+    if op in ("pay", "release", "refund") and response is not None:
+        reference = response.reference  # "" when refused
     record = dict(client=name, client_id=client.client_id, user=user, seq=seq, op=op,
                   outcome=outcome, reason=reason, start=start, end=end, latency=m1 - m0, mono_end=m1,
-                  high_bid=high_bid, high_bidder=high_bidder, **fields)
+                  high_bid=high_bid, high_bidder=high_bidder, reference=reference, **fields)
     if op == "login" and outcome == "ok":
         record["token_hash"] = hash_token(response.token)
     history.append(record)
@@ -138,6 +140,13 @@ class Board:
     def all_ids(self) -> list:
         with self._lock:
             return sorted(self.close_time)
+
+    def closed_ids(self, margin_us=1_500_000) -> list:
+        """Auctions whose scheduled close is more than `margin_us` ago: the
+        closer has probably closed them by now."""
+        t = now_us() - margin_us
+        with self._lock:
+            return sorted(a for a, c in self.close_time.items() if c < t)
 
 
 class Actor(threading.Thread):
@@ -178,10 +187,40 @@ class Seller(Actor):
         super().__init__(workload, f"seller{index}", USERS[index % len(USERS)])
         self.index = index
         self.made = 0
+        self.mine = []  # auctions this seller created and has not finished settling
+
+    def settle(self):
+        """The seller's half of the escrow: release (mostly) or refund the money
+        the winner paid, and now and then try the OTHER settlement afterwards,
+        which must be refused (RELEASED and REFUNDED are final)."""
+        w = self.w
+        for a in list(self.mine):
+            if w.stopping.is_set():
+                return
+            if w.board.close_time[a] < now_us() - int(120e6):
+                self.mine.remove(a)  # closed long ago and never paid: stop asking
+                continue
+            try:
+                view = self.client.get_escrow(a)
+            except (ClusterUnavailable, grpc.RpcError):
+                continue
+            if not view.result.success or view.escrow.status in ("NONE",):
+                continue
+            self.mine.remove(a)
+            if view.escrow.status != "HELD":
+                continue
+            release = self.rng.random() < 0.8
+            op = "release" if release else "refund"
+            call = self.client.release_escrow if release else self.client.refund_escrow
+            self.write(op, lambda: call(a), auction_id=a)
+            if self.rng.random() < 0.3:
+                other = self.client.refund_escrow if release else self.client.release_escrow
+                self.write("refund" if release else "release", lambda: other(a), auction_id=a)
 
     def body(self):
         w = self.w
         while not w.stopping.is_set():
+            self.settle()
             if len(w.board.open_ids()) < w.max_open:
                 self.made += 1
                 auction_id = (self.index + 1) * 1_000_000 + self.made
@@ -192,6 +231,7 @@ class Seller(Actor):
                                auction_id=auction_id, item=f"item {auction_id}", close_time=close)
                 if r["outcome"] != "rejected":
                     w.board.add(auction_id, close)  # "unknown" too: it may exist
+                    self.mine.append(auction_id)
             self.pause(0.2, 1.0)
 
 
@@ -245,10 +285,45 @@ class Racer(Actor):
                 w.board.observe(a, r["high_bid"])
 
 
+class Payer(Actor):
+    """The winner's half of the escrow. Logs in as one user, looks at auctions
+    that should have closed, and pays the winning bid for the ones that user
+    won. Now and then it also does what must be REFUSED: pays a second time,
+    or pays an auction somebody else won."""
+
+    def __init__(self, workload, index):
+        super().__init__(workload, f"payer{index}", USERS[index % len(USERS)])
+        self.looked_at = set()
+
+    def body(self):
+        w = self.w
+        while not w.stopping.is_set():
+            for a in w.board.closed_ids():
+                if a in self.looked_at or w.stopping.is_set():
+                    continue
+                try:
+                    auction = self.client.get_auction(a)
+                except (ClusterUnavailable, grpc.RpcError):
+                    continue  # look again next round
+                if auction is None or not auction.closed:
+                    continue  # not created, or the closer has not closed it yet
+                self.looked_at.add(a)
+                if not auction.winner:
+                    continue  # nobody bid: nothing to pay
+                amount = auction.current_high_bid
+                if auction.winner == self.user:
+                    self.write("pay", lambda: self.client.pay(a, amount), auction_id=a, amount=amount)
+                    if self.rng.random() < 0.3:  # a second payment: must be refused
+                        self.write("pay", lambda: self.client.pay(a, amount), auction_id=a, amount=amount)
+                elif self.rng.random() < 0.15:   # not the winner: must be refused
+                    self.write("pay", lambda: self.client.pay(a, amount), auction_id=a, amount=amount)
+            self.pause(0.3, 1.0)
+
+
 class Workload:
     def __init__(self, addrs, seed, *, sellers=1, bidders=4, racers=3, think=(0.0, 0.3),
                  close_after=(15.0, 60.0), max_open=4, llm_fraction=0.3, race_every=(0.5, 2.0),
-                 give_up_after=30.0):
+                 give_up_after=30.0, payers=len(USERS)):
         if racers > len(USERS):
             raise ValueError(f"at most {len(USERS)} racers: each needs its own username")
         self.addrs = list(addrs)
@@ -261,7 +336,7 @@ class Workload:
         self.think, self.close_after, self.max_open = think, close_after, max_open
         self.llm_fraction, self.race_every, self.give_up_after = llm_fraction, race_every, give_up_after
         self.actors = ([Seller(self, i) for i in range(sellers)] + [Bidder(self, i) for i in range(bidders)]
-                       + [Racer(self, i) for i in range(racers)])
+                       + [Racer(self, i) for i in range(racers)] + [Payer(self, i) for i in range(payers)])
         self.racers = [a for a in self.actors if isinstance(a, Racer)]
         self._rng = random.Random(f"{seed}:races")
         self._coordinator = threading.Thread(target=self._races, name="race-coordinator", daemon=True)

@@ -80,4 +80,12 @@ def test_workload_with_a_leader_kill_passes_the_checker(grpc_cluster):  # noqa: 
         assert outcomes.count("ok") == 1  # equal bids: exactly one wins
     doc = json.loads(dumps["n1"]["state_json"])
     assert any(a["closed"] for a in doc["auctions"])
+
+    # Chunk 7: payments were really attempted, and the new properties looked at them.
+    pays = [r for r in history if r["op"] == "pay"]
+    assert any(r["outcome"] == "ok" for r in pays), f"no payment was accepted: {pays}"
+    assert any(a["escrow"]["status"] != "NONE" for a in doc["auctions"])
+    by_name = {r.name: r for r in report}
+    assert by_name[P.ESCROW].checked > 0 and by_name[P.SUMMARIES].checked > 0
+    assert any(a["summaries"] for a in doc["auctions"])  # the fake LLM answered; the worker recorded it
     assert len({rec["term"] for rec in monitor.leader_records()}) >= 2  # there was a failover
