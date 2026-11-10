@@ -48,13 +48,13 @@ class GrpcCluster:
         self.addrs = {nid: PeerAddr(HOST, free_port(), free_port()) for nid in ids}
         self.nodes = {}
 
-    def boot(self, nid, **config):
+    def boot(self, nid, llm_client=None, **config):
         peers = {p: a for p, a in self.addrs.items() if p != nid}
         me = self.addrs[nid]
         node = AuctionNode(
             nid, HOST, me.client_port, me.peer_port, peers,
             storage=FileStorage(os.path.join(self.data_dir, nid)),
-            llm_client=FakeLLMClient(),
+            llm_client=llm_client if llm_client is not None else FakeLLMClient(),
             propose_timeout=2.0,
             **{**FAST, **config},
         )

@@ -14,15 +14,20 @@ not by a race. Every wait is wait_until(condition, BOUND).
 import random
 import time
 
-from raft.node import RaftNode, Role
 from raft.messages import Transport, TransportError
+from raft.node import RaftNode, Role
 from raft.storage import MemoryStorage
 from raft.transport import InMemoryTransport
 from replication.replicator import RaftReplicator
 from replication.state_machine import StateMachine
+from server.assistant_servicer import AssistantServicer
 from server.auction_servicer import AuctionServicer
 from server.auth_interceptor import AuthInterceptor
 from server.auth_servicer import AuthServicer
+from server.business_servicer import BusinessServicer
+from server.payment_gateway import MockPaymentGateway
+from server.payment_servicer import PaymentServicer
+from server.summarizer import SummaryWorker
 from sessions.store import SessionStore
 
 FAST = dict(election_timeout=(0.15, 0.30), heartbeat_interval=0.03)
@@ -82,12 +87,17 @@ class FakeLLMClient:
         self.calls = []
         self.answer = "a fine specimen"
         self.error = None
+        # Called after the call is recorded and before it answers: lets a test
+        # make something else happen "while the model is thinking".
+        self.on_call = None
 
     def get_llm_answer(self, request_id, query, context):
         self.calls.append((request_id, query, context))
+        if self.on_call is not None:
+            self.on_call()
         if self.error is not None:
             raise self.error
-        return self.answer
+        return request_id, self.answer
 
 
 class Node:
@@ -100,6 +110,12 @@ class Node:
         self.interceptor = AuthInterceptor(self.sessions, replicator)
         self.llm = FakeLLMClient()
         self.auction = AuctionServicer(sm.auctions, self.llm, replicator)
+        self.gateway = MockPaymentGateway()
+        self.payment = PaymentServicer(sm.auctions, self.gateway, replicator)
+        self.assistant = AssistantServicer(sm.auctions, self.llm, replicator)
+        self.business = BusinessServicer(self.auction, self.payment, self.assistant)
+        # Not started: tests call self.summarizer.tick(...) themselves.
+        self.summarizer = SummaryWorker(sm.auctions, self.llm, replicator)
 
     def snapshot(self):
         return self.sm.snapshot()
@@ -210,11 +226,11 @@ class AuctionCluster:
 # context stands in for grpc.ServicerContext: abort() raises RpcAbort,
 # carrying whatever trailing metadata the handler set first.
 
-from collections import namedtuple  # noqa: E402
+from collections import namedtuple
 
-import grpc  # noqa: E402
+import grpc
 
-from common.wire import TOKEN_METADATA_KEY  # noqa: E402
+from common.wire import TOKEN_METADATA_KEY
 
 HandlerCallDetails = namedtuple("HandlerCallDetails", ["method", "invocation_metadata"])
 
@@ -241,7 +257,13 @@ class FakeContext:
 
 
 def call(node, service, method, request, token=None):
-    servicer = {"AuthService": node.auth, "AuctionService": node.auction}[service]
+    servicer = {
+        "AuthService": node.auth,
+        "AuctionService": node.auction,
+        "PaymentService": node.payment,
+        "AssistantService": node.assistant,
+        "BusinessService": node.business,
+    }[service]
     handler = grpc.unary_unary_rpc_method_handler(getattr(servicer, method))
     metadata = [(TOKEN_METADATA_KEY, token)] if token else []
     details = HandlerCallDetails(f"/auction.{service}/{method}", metadata)
