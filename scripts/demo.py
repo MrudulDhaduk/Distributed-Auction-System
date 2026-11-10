@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from client.auction_client import ClusterClient
 from common import time_conv
 from harness import run as R
+from harness.events import EventLog, StatusThread, election_from_text
 from harness.procs import ROOT, LocalCluster
 from harness.status import StatusMonitor, StatusPoller, current_leader
 from harness.workload import PASSWORD, History, record_write
@@ -62,13 +63,22 @@ def main(argv=None) -> int:
     cluster = LocalCluster(run_dir, base_peer=args.base_peer, base_client=args.base_client,
                            llm_port=None if args.no_llm else args.llm_port)
     poller = StatusPoller(cluster.peer_addrs())
-    monitor = StatusMonitor(poller, interval=0.05)
     history = History()
     users = {}
     t_start = time.monotonic()
     timings = []   # (step, seconds): what the video planning reads
+    log = EventLog(os.path.join(run_dir, "events.jsonl"), t0=t_start)  # the replay's input (Part B)
+
+    def on_monitor_event(text):
+        found = election_from_text(text)
+        if found:
+            log.write("election", leader=found[0], term=found[1])
+
+    monitor = StatusMonitor(poller, interval=0.05, on_event=on_monitor_event)
+    status_thread = StatusThread(log, monitor, list(cluster.nodes))
 
     def step(text):
+        log.write("step", text=text)
         print(f"\n=== [{time.monotonic() - t_start:6.1f}s] {text}", flush=True)
         time.sleep(args.pause)
 
@@ -87,6 +97,10 @@ def main(argv=None) -> int:
             extra = f" [reference {r['reference'] or '-'}]"
         print(f"  {name:7s} {op:7s} {fields.get('amount', '')!s:>4}  -> {r['outcome']:8s} {r['reason']}{extra}",
               flush=True)
+        log.write("action", user=r["user"], op=op, auction_id=fields.get("auction_id"),
+                  amount=fields.get("amount"), outcome=r["outcome"], reason=r["reason"],
+                  high_bid=r["high_bid"] if op == "bid" else None,
+                  high_bidder=r["high_bidder"] if op == "bid" else None, background=False)
         return r
 
     def bid(name, amount):
@@ -96,18 +110,22 @@ def main(argv=None) -> int:
         e = users[name].get_escrow(AUCTION).escrow
         print(f"  {label}: status {e.status}, amount {e.amount}, payer {e.payer or '-'}, seller {e.seller}, "
               f"payment_ref {e.payment_ref or '-'}, settlement_ref {e.settlement_ref or '-'}", flush=True)
+        log.write("escrow", auction_id=AUCTION, status=e.status, amount=e.amount, payer=e.payer,
+                  seller=e.seller, payment_ref=e.payment_ref, settlement_ref=e.settlement_ref)
         return e
 
     def kill_leader(why):
         view = poller.poll()
         leader = current_leader(view)
         step(f"KILL -9 the leader {leader} (term {view[leader].term}) {why}")
+        log.write("kill", node=leader, term=view[leader].term)
         cluster.nodes[leader].kill()
         print(f"  {leader} killed")
         return leader
 
     def restart(node_id):
         step(f"restart {node_id}: it replays its log from disk and catches up from the new leader")
+        log.write("restart", node=node_id)
         R.ensure_started(cluster.nodes[node_id])
         caught_up = R.quiet(poller, timeout=60)
         print(f"  {node_id} back; replicas agree: {caught_up}")
@@ -117,6 +135,7 @@ def main(argv=None) -> int:
         step(f"starting LLM + 3 nodes (logs and data under {run_dir})")
         cluster.start()
         monitor.start()
+        status_thread.start()
         leader = R.wait_for_leader(poller, 60)
         print(f"  leader: {leader}")
 
@@ -150,6 +169,8 @@ def main(argv=None) -> int:
             auction_id=AUCTION, item="vintage clock", close_time=close))
         a = users["nisarg"].get_auction(AUCTION)
         print(f"  description (replicated as data): {a.description!r}" if a else "  (no auction?)")
+        log.write("auction", auction_id=AUCTION, item="vintage clock", close_time=close,
+                  description=a.description if a else None)
 
         step("bids: karan 100, mrudul 150")
         bid("karan", 100)
@@ -167,6 +188,7 @@ def main(argv=None) -> int:
         answer = timed("assistant FAQ", lambda: users["tanmay"].ask_assistant(q, auction_id=AUCTION))
         print(f"  Q: {q}")
         print(f"  A: {answer.answer!r}" if answer.result.success else f"  (no answer: {answer.result.reason})")
+        log.write("faq", question=q, answer=answer.answer if answer.result.success else None)
 
         leader = kill_leader("mid-auction")
 
@@ -190,6 +212,8 @@ def main(argv=None) -> int:
         bid("tanmay", 500)  # too late: must be refused
         a = users["nisarg"].get_auction(AUCTION)
         print(f"  closed={a.closed} winner={a.winner!r} bids={[(b.bidder, b.amount) for b in a.bids]}")
+        if a.closed:
+            log.write("close", auction_id=AUCTION, winner=a.winner, winning_bid=a.current_high_bid)
 
         if not args.no_llm:
             step("the leader's summary worker asks the model for the result summary and replicates the text")
@@ -204,6 +228,8 @@ def main(argv=None) -> int:
             timings.append(("close -> summary visible", time.monotonic() - closed_at))
             print(f"  summary after {timings[-1][1]:.1f} s: {summary!r}" if summary
                   else f"  no summary within {SUMMARY_WAIT_SECONDS} s")
+            if summary:
+                log.write("summary", auction_id=AUCTION, text=summary)
 
         winner, amount = a.winner, a.current_high_bid
         step(f"{winner} (the winner) pays {amount} into ESCROW; tanmay (not the winner) tries and is refused")
@@ -228,13 +254,19 @@ def main(argv=None) -> int:
         print(f"  auctions {s.auctions}, with bids {s.with_bids}, lowest {s.lowest_winning_bid}, "
               f"highest {s.highest_winning_bid}, total bids {s.total_bids}")
         print(f"  summary: {trends.summary!r}" if trends.result.success else f"  ({trends.result.reason})")
+        log.write("trends", stats={f.name: getattr(s, f.name) for f in s.DESCRIPTOR.fields},
+                  summary=trends.summary if trends.result.success else None)
 
         step("checker: every property, on what the clients saw + every node's final state")
         R.quiet(poller, timeout=60)
         dumps = R.collect_dumps(poller)
+        status_thread.stop()
         monitor.stop()
         report, text = R.check_and_save(run_dir, history.snapshot(), dumps, R.leader_records(cluster, monitor))
         print(text)
+        log.write("checker", properties=[{"name": r.name, "passed": r.passed, "checked": r.checked}
+                                         for r in report],
+                  all_passed=all(r.passed for r in report))
         print("\ntimings of the slow steps:")
         for label, seconds in timings:
             print(f"  {label:42s} {seconds:6.2f} s")
@@ -247,7 +279,9 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        status_thread.stop()
         monitor.stop()
+        log.close()
         for c in users.values():
             c.close()
         cluster.stop()
