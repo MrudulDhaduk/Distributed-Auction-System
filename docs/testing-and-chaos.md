@@ -333,11 +333,45 @@ uses 6 s, T12). All eight properties pass.
 
 ---
 
-## 6. Results of the 10-minute run
+## 6. Results of the 10-minute runs
 
-**Seed 737075**, `scripts/chaos.py --duration 600` (defaults: 1 seller, 4
-bidders, 3 racers, client give-up 6 s, LLM server running), run dir
-`runs/chaos-737075-20261109-215345`. Exit code 0.
+Three 10-minute runs, `scripts/chaos.py --duration 600`, all with the
+defaults: 1 seller, 4 bidders, 3 racers, client give-up 6 s, LLM server
+running.
+
+| seed | code | result |
+|---|---|---|
+| **634526** (final) | `b3673a7`: T16 + T17 + T19 | **all 8 properties PASS**, exit 0 |
+| 79402 | `1691f95`: T16 + T17 | no verdict: the harness killed itself at 562 s (T19). Not a system failure, and no checker ran |
+| 737075 | before T16 | all 8 properties PASS, exit 0. Latencies inflated by the status RPC (T16) |
+
+**Final run, seed 634526** (`runs/chaos-634526-20261110-104604`):
+
+| | |
+|---|---|
+| faults | 58: kill_follower 19, kill_two 14, kill_leader 13, suspend_follower 8, suspend_leader 4 |
+| leader terms | 39 terms had a leader, last term 159 |
+| writes | 11 256: bid ok 8 957, rejected 2 137, unknown 88, create ok 62, create unknown 4, login ok 8 |
+| unknown bids | 88, of which 3 committed (exactly once each) |
+| races | 1 152 race bids in 384 equal-amount groups, no group with two winners |
+| auctions | 63 (62 acknowledged + 1 unknown create that had committed), all closed; final `digest_index` 11 293 on all three nodes |
+| bid latency under chaos | p50 8.1 ms, p95 145 ms, max 5.65 s (it was p50 47 ms before T16) |
+| T17 retries | 0 `os.replace refused` warnings in this run (the race needs much more term churn than 0.5-1.0 s timeouts produce) |
+
+```
+PASS  history-well-formed  (checked 11256)
+PASS  acked-writes-on-every-node-exactly-once  (checked 27081)
+PASS  replicas-identical  (checked 3)
+PASS  bids-strictly-increasing-winner-is-max  (checked 189)
+PASS  no-bid-accepted-after-close  (checked 35837)
+PASS  rejections-consistent-with-final-state  (checked 2137)
+PASS  unknown-outcome-at-most-once  (checked 264)
+PASS  at-most-one-leader-per-term  (checked 77)
+ALL PROPERTIES PASS
+```
+
+**First run, seed 737075**, run dir `runs/chaos-737075-20261109-215345`.
+Exit code 0.
 
 | | |
 |---|---|
