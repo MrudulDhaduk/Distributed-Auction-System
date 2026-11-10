@@ -20,6 +20,13 @@ _USERS = {
     "nisarg": "pass",
     "karan": "pass",
     "tanmay": "pass",
+    # Demo background bidders (scripts/demo.py). Same password as the others.
+    "bg1": "pass",
+    "bg2": "pass",
+    "bg3": "pass",
+    "bg4": "pass",
+    "bg5": "pass",
+    "bg6": "pass",
 }
 
 
