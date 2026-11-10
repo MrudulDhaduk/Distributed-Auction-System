@@ -219,7 +219,8 @@ same gap by scanning the state and fill it." **Be honest on camera:** the summar
 prompt now gets computed facts and no times, but a language model can still get a
 number wrong (the one live check wrote 40 for 400). Its text is stored, not trusted.
 Numbers in the summary are checked against the facts in code, with a template fallback;
-it cannot catch the model swapping two valid numbers (e.g. opening and closing).
+it cannot catch the model swapping two valid numbers (e.g. opening and closing) and does
+not check numbers written as words (e.g. "forty").
 
 ---
 

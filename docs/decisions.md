@@ -2631,18 +2631,25 @@ more commands in the same additive way as step 1.
                 400." 31 words, 5.49 s. It lists no bids and gives no times.
                 **It is wrong in one place: the closing bid was 400, not 40.**
                 The facts were right and the model dropped a digit.
-- Not solved:   the model can still misstate a number it was given. A cheap
-                check would be to reject any summary containing a number that is
-                not in the facts block, in code, before it is replicated. Not
-                built; written down as a gap (payment-and-llm.md section 4).
+- Now checked:  the model can still misstate a number it was given, so the
+                summary worker checks the text in code before it is replicated.
+                The facts (item, bid count, distinct bidders, opening and
+                closing bid, winner, winning bid) are computed from the state
+                snapshot, not taken from the model's prompt, and
+                `summary_numbers_ok` rejects any summary with a number that is
+                not among them ("40" for 400 fails). A rejected summary is
+                replaced by `template_summary(facts)`, a plain f-string built
+                only from the facts (both in server/summarizer.py).
+- Known limits: the check cannot catch the model swapping two valid numbers
+                (e.g. writing the opening bid where the closing bid belongs):
+                both are in the facts. It also does not check numbers written as
+                words (e.g. "forty"): only digits are extracted.
 - Cost:         the item name and bidder names are still in the system turn (the
                 known soft spot of this job), now inside the FACTS block.
-- Follow-up:    numbers in the summary are checked against the facts in code, with a
-                template fallback (`summary_numbers_ok`, `template_summary` in
-                server/summarizer.py). Known limit: it cannot catch the model
-                swapping two valid numbers (e.g. opening and closing).
 - Viva Q:       "How do you stop the model inventing things in the summary?"
 - Answer:       I take away what it could invent from. It gets no times and no
                 bid list, only computed facts. That stopped the listing and the
-                timing claims in the one live call I ran. It does not stop a
-                wrong digit, and I say so; the next step would be a check in code.
+                timing claims in the one live call I ran. A wrong digit is
+                caught in code and replaced by a template. Two valid numbers
+                swapped, or a number written as a word, still get through, and
+                I say so.
