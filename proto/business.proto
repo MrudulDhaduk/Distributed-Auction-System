@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package business;
+
+import "google/protobuf/any.proto";
+
+// R12: the assignment's server-side entry point,
+//
+//     processBusinessRequest(requestId, payload, context)
+//
+// as a real RPC on the application server. It is a DISPATCHER and nothing
+// more: it parses `payload` and calls the handler that already serves the same
+// operation as a typed RPC (AuctionService, PaymentService, AssistantService),
+// handing that handler the SAME gRPC context. So there is exactly one
+// implementation of every operation, and this RPC inherits, rather than
+// re-implements:
+//
+//   * AUTH. The session token travels in gRPC metadata and is checked by the
+//     interceptor like for every other RPC. Nothing in `payload` or `context`
+//     is ever used as a credential.
+//   * IDENTITY. The caller is the token's user; the payload cannot name one.
+//   * LEADER RULES. A follower answers FAILED_PRECONDITION with the leader's
+//     address; an unknown outcome is UNAVAILABLE; reads wait for a read
+//     barrier; the LLM is called only on the leader.
+//   * DEDUPE. A write carries (client_id, seq), the section 8 serial number,
+//     and is answered from the replicated table if it was already executed.
+//
+// The typed RPCs stay (the chaos harness and checker use them). This one exists
+// because the assignment names it. The cost: an untyped payload, which the typed
+// RPCs deliberately avoid, so the server validates it field by field and answers
+// INVALID_ARGUMENT, naming the field, before anything is proposed.
+
+service BusinessService {
+  rpc ProcessBusinessRequest(BusinessRequest) returns (BusinessResponse);
+}
+
+message BusinessRequest {
+  // Chosen by the caller; echoed in the response and logged next to the
+  // handler's own log lines. It is NOT a dedupe key: that is (client_id, seq).
+  string request_id = 1;
+
+  // JSON text:  {"method": "post" | "get", "type": <type>, "data": {...}}
+  //
+  //   post  auction     {auction_id, item, close_time[, attributes]}
+  //         bid         {auction_id, amount}
+  //         payment     {auction_id[, action: pay | release | refund][, amount]}
+  //         description {auction_id, attributes}
+  //   get   auction     {auction_id}
+  //         auctions    {[include_closed]}
+  //         escrow      {auction_id}
+  //         assistant   {question[, auction_id]}
+  //         price_trends {[limit]}
+  //
+  // JSON rather than a protobuf Struct so that integers (epoch microseconds are
+  // about 1.8e15) are not squeezed through a double.
+  string payload = 2;
+
+  // Extra caller-supplied key/values (a trace id, say). Logged, never
+  // interpreted, never a credential.
+  map<string, string> context = 3;
+
+  // Section 8 serial number. Set for a "post"; leave empty/zero for a "get".
+  string client_id = 4;
+  uint64 seq = 5;
+}
+
+message BusinessResponse {
+  string request_id = 1;
+  // The dispatched handler's own typed response (PlaceBidResponse,
+  // PaymentResponse, GetAuctionResponse, ...), packed. The caller knows which
+  // from the method and type it asked for.
+  google.protobuf.Any response = 2;
+}
