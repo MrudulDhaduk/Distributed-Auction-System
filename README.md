@@ -208,12 +208,16 @@ c.get(c.token, "price_trends", {})
 ```
 
 It opens the dashboard and runs `scripts\demo.py`: start the LLM server and 3
-nodes, warm the model, log in, create an auction (the LLM writes the
-description), race two equal bids, ask the assistant about the live auction,
-kill -9 the leader, keep bidding, restart the dead node, wait for the close,
-show the LLM-written result summary, have the winner pay into escrow, kill -9
-the leader **again** and read the same escrow from the new leader, release it,
-show price trends, then run the checker.
+nodes, warm the model, log in, create four auctions (the LLM writes each
+description), start six background bidders (`bg1`-`bg6`, one client each) that
+bid on auctions 2-4 until they close, race two equal bids on auction 1 (the
+hero), ask the assistant about the live auction, kill -9 the leader **while the
+background bidders are bidding**, keep bidding, restart the dead node, wait for
+the closes (the hero closes last), show the LLM-written result summaries, have
+the winners pay into escrow (the background winners with their own clients),
+kill -9 the leader **again** and read the same escrow from the new leader,
+release and refund the escrow, show price trends and the stall each leader kill
+caused for the background bidders, then run the checker.
 
 Run end to end on 2026-11-10 with the real model (`demo.ps1 -Pause 0.5`, exit
 0, all ten properties PASS, 90.2 s with 0.5 s pauses). Timings printed by that
@@ -222,9 +226,11 @@ assistant answer 1.14 s, close to summary visible 5.56 s, price trends 2.28 s.
 At `-Pause 4` the same run is longer by about 3.5 s per step. Minute-by-minute
 script: [docs/demo-runsheet.md](docs/demo-runsheet.md).
 
-Run with the event log on 2026-11-10 at `-Pause 4` (the presenting speed): all
-ten properties PASS, whole run 125.16 s. Its output and its replay are in
-`runs\demo-20261110-143237` (local only).
+Run on 2026-11-10 at `-Pause 4` (the presenting speed), the four-auction demo:
+all ten properties PASS, whole run 147.19 s. The background bidders made 599
+bids (531 accepted, 68 refused, 0 errors); the first leader kill stalled a
+background bid for 2.18 s. Its output and its replay are in
+`runs\demo-20261110-150720` (local only).
 
 Do not run the demo and `run_cluster.ps1` at the same time: they use the same
 ports.
@@ -431,6 +437,8 @@ there.
   field on the server. It dispatches to the typed handlers behind the same auth
   and leader rules; the typed RPCs are the primary API (decisions.md C19).
 - Chaos runs are seeded but not deterministic, because they use real processes and wall-clock time. A deterministic simulator on a virtual clock is the natural next step.
+- **The demo's second leader kill is not under background load.** The hero auction closes last and its payment waits for that close, so every background auction has already closed when the second kill happens. The demo reports that stall as n/a.
+- **The background bidders are clients on one machine,** about 17 bids a second in the steady state. They are not a load test.
 
 ---
 

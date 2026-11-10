@@ -6,14 +6,14 @@ assignment's LLM, payment and fault-tolerance items).
 
 The video has five parts. Each block gives the time, what to type or show,
 what to say, and the expected output. **Every "Expected" block is real output**
-from the run named in it. Where a value changes from run to run, the block says
-so.
+from the run named in it: the official four-auction run `runs\demo-20261110-150720`,
+unless a block says otherwise. Where a value changes from run to run, the block says so.
 
 | time | part | source of the footage |
 |---|---|---|
 | 0:00-0:45 | intro and architecture | README.md, the architecture diagram |
-| 0:45-2:45 | the **LIVE** run, `demo.ps1 -Pause 4`, sped up in editing, ending on `DEMO: ALL PROPERTIES PASS` | screen capture of the live run |
-| 2:45-6:45 | the **REPLAY** of that same run, slowed to 0.5x, explained marker by marker | `runs\demo-20261110-143237\replay.html` |
+| 0:45-2:45 | the **LIVE** run, `demo.ps1 -Pause 4`, ending on `DEMO: ALL PROPERTIES PASS`. The run takes **2:27**, so speed it up by about 20% in editing | screen capture of the live run |
+| 2:45-6:45 | the **REPLAY** of that same run, slowed to about 0.6x (the run is 2:28), explained marker by marker | `runs\demo-20261110-150720\replay.html` |
 | 6:45-8:15 | the 10-minute chaos run and its checker | `runs\chaos-396704-20261110-125757\` |
 | 8:15-9:00 | honest limits | README, "Known limitations" |
 
@@ -23,10 +23,9 @@ so.
 
 | piece | status | evidence |
 |---|---|---|
-| `scripts/demo.ps1 -Pause 4` (the presenting speed), with the real LLM, after the event log was added | **run on 2026-11-10**, all 10 properties PASS, whole run 125.16 s, `DEMO: ALL PROPERTIES PASS` | `runs/demo-20261110-143237/` (local only; the output is quoted below) |
-| `scripts/demo.ps1 -Pause 0.5`, with the real LLM | run on 2026-11-10, exit 0, all 10 PASS, 90.16 s | `runs/demo-20261110-130952/` |
-| `scripts/replay.py` on the `-Pause 4` run | built and checked in **Microsoft Edge (headless), driven over the DevTools protocol**. Playwright is **not installed** on this machine, so it could not be used. 17 browser checks passed, no console errors, play/pause, slider drag, arrow keys, marker click and the end checker panel all checked | `runs/demo-20261110-143237/replay.html`, `replay-kill.png`, `replay-end.png` |
-| the demo's **four-auction** version (background bidders, refunds) | **not built.** Blocked: the background users `bg1`-`bg6` do not exist on the server, and creating them needs a change to `server/`, which was not allowed | — |
+| `scripts/demo.ps1 -Pause 4`, the **four-auction** demo, with the real LLM | **run on 2026-11-10, the official run.** Exit 0, all 10 properties PASS, whole run 147.19 s | `runs/demo-20261110-150720/` (local only; the output is quoted below) |
+| the same demo, two earlier runs | `demo-20261110-145843` and `demo-20261110-150129`. Both passed, but they found two problems, now fixed: a timing flaw that refused the hero's bids (the hero winner changed), and the replay lacking the background escrow. **Not used for the video** | local only |
+| `scripts/replay.py` on the official run | built and checked in **Microsoft Edge (headless), driven over the DevTools protocol**. Playwright is **not installed** on this machine, so it could not be used. 17 browser checks passed on the final page, no console errors | `runs/demo-20261110-150720/replay.html`, `replay-kill.png`, `replay-end.png` |
 | `scripts/chaos.py --duration 600 --fake-llm`, seed 396704 | run on 2026-11-10: all 10 PASS | `runs/chaos-396704-20261110-125757/`; [testing-and-chaos.md](testing-and-chaos.md) §6.1 |
 | `scripts/chaos.py --seed 5 --duration 45` live | run on 2026-11-09 with older settings (before payments); not re-run | `runs/chaos-5-20261109-215202/` |
 
@@ -47,20 +46,19 @@ so.
    Windows can hand one of the fixed ports to it (testing-and-chaos.md Known
    gaps 13).
 3. **Ollama must be running and the model pulled** (README, "The LLM"). The
-   demo warms the model itself as its first step (4.50 s in the `-Pause 4`
-   run). Keep the model loaded: Ollama unloads an idle model after a few
-   minutes, and the next call is slow again. `demo.py --no-llm` shows the
-   degraded path instead.
+   demo warms the model itself as its first step (1.63 s in the official run).
+   Keep the model loaded: Ollama unloads an idle model after a few minutes, and
+   the next call is slow again. `demo.py --no-llm` shows the degraded path instead.
 4. Window layout: terminal A (left, large) for commands; the dashboard window
    that `demo.ps1` opens (right). The dashboard window stays open after the
    demo: close it yourself.
 5. Font size up. The replay is built for a 1920x1080 screen.
-6. Make the replay for the run you will show, after that run:
+6. The replay is made from a run, after the run:
    ```powershell
    .venv\Scripts\python.exe scripts\replay.py runs\demo-<time>
    ```
-   It writes `runs\demo-<time>\replay.html`. Open that file in a browser.
-   The replay is a file, so nothing needs to be running.
+   It writes `runs\demo-<time>\replay.html`. Open that file in a browser. It is
+   one file, so nothing needs to be running.
 
 ---
 
@@ -73,9 +71,10 @@ written from the paper, no library. Every change, a login, a new auction, a
 bid, a payment, is a command in the Raft log, applied by the same
 deterministic `apply()` on every node. A separate LLM server, on its own
 process and port, answers questions and writes descriptions and summaries, but
-only its text ever enters the log, never the call. I'll run the demo live, then
-replay the same run from its recorded event log, then run a 10-minute chaos test
-and its checker."
+only its text ever enters the log, never the call. Four auctions run at once,
+with six background bidders on three of them, and I'll kill the leader while
+they are bidding. Then I'll replay the same run from its event log, and run a
+10-minute chaos test and its checker."
 
 ---
 
@@ -86,129 +85,164 @@ and its checker."
 .\scripts\demo.ps1 -Pause 4
 ```
 It opens the dashboard in a new window, then runs `scripts\demo.py --pause 4`
-here. The whole run takes about two minutes at this speed; speed it up in
-editing if you need to, but keep the pauses in the recording, because the
-replay uses the same timings.
+here. The run takes 2:27 at this speed. Speed it up in editing by about 20% to
+fit the slot, but keep the pauses in the recording, because the replay uses the
+same timings.
 
-**Expected (terminal A), the run recorded as `runs\demo-20261110-143237`:**
+**Expected (terminal A), the official run `runs\demo-20261110-150720`:**
 ```
-=== [   0.0s] starting LLM + 3 nodes (logs and data under E:\...\runs\demo-20261110-143237)
-  leader: n1
+=== [   0.0s] starting LLM + 3 nodes (logs and data under E:\...\runs\demo-20261110-150720)
+  leader: n2
 
 === [   5.1s] warm the model: the first call after Ollama loads the weights is slow
-  (model warm-up: 4.50 s)
+  (model warm-up: 1.63 s)
 
-=== [  13.6s] log in: nisarg (seller), karan, mrudul, tanmay -- one client each
+=== [  10.7s] log in: nisarg (seller), karan, mrudul, tanmay -- one client each
   nisarg  login         -> ok       your session is created
   karan   login         -> ok       your session is created
   mrudul  login         -> ok       your session is created
   tanmay  login         -> ok       your session is created
 
-=== [  17.6s] nisarg creates auction 1, closing in 60 s (the LLM writes the description)
+=== [  14.7s] nisarg creates auction 1, closing in 75 s (the LLM writes the description)
   nisarg  create        -> ok       Auction created successfully by nisarg
-  (create auction incl. LLM description: 1.87 s)
-  description (replicated as data): 'A running Seiko clock from the 1970s. Functional and operational as intended. Manufactured during the 1970s era. No additional details provided.'
+  (create auction incl. LLM description: 1.50 s)
+  description (replicated as data): 'A running Seiko clock from the 1970s. Functional and operating as intended. No additional details provided about appearance, style, or specific model.'
 
-=== [  23.5s] bids: karan 100, mrudul 150
+=== [  20.2s] nisarg creates auctions 2-4 right after the hero: background auctions (the LLM writes each description)
+  nisarg  create        -> ok       Auction created successfully by nisarg
+  nisarg  create        -> ok       Auction created successfully by nisarg
+  nisarg  create        -> ok       Auction created successfully by nisarg
+
+=== [  28.0s] six background bidders bg1-bg6 log in and bid on auctions 2-4 until they close (not printed one by one; a status line every 5 s)
+
+=== [  32.0s] bids: karan 100, mrudul 150
   karan   bid      100  -> ok       Bid of 100 added [high 100 by karan]
   mrudul  bid      150  -> ok       Bid of 150 added [high 150 by mrudul]
 
-=== [  27.5s] karan and tanmay both bid 200 at the same moment (exactly one can win)
+=== [  36.0s] karan and tanmay both bid 200 at the same moment (exactly one can win)
+background: 88 bids, 78 accepted, 10 rejected, 0 errors | leader n2, term 1, commit 105
   karan   bid      200  -> ok       Bid of 200 added [high 200 by karan]
   tanmay  bid      200  -> rejected Bid of 200 is not added because current highest bid is 200 [high 200 by karan]
 
-=== [  31.5s] tanmay asks the assistant about the live auction (the leader sends the model its current state)
-  (assistant FAQ: 1.17 s)
+=== [  40.0s] tanmay asks the assistant about the live auction (the leader sends the model its current state)
+background: 172 bids, 155 accepted, 17 rejected, 0 errors | leader n2, term 1, commit 190
+  (assistant FAQ: 1.23 s)
   Q: Can I bid one more than the current high bid?
   A: 'Yes, you can bid one more than the current high bid. That would be 201.'
 
-=== [  36.6s] KILL -9 the leader n1 (term 1) mid-auction
-  n1 killed
+=== [  45.3s] KILL -9 the leader n2 (term 1) mid-auction, under background load
+background: 256 bids, 233 accepted, 23 rejected, 0 errors | leader n2, term 1, commit 275
+  n2 killed
 
-=== [  40.6s] keep bidding: the clients' next call hits the dead node, backs off, finds the new leader
+=== [  49.3s] keep bidding: the clients' next call hits the dead node, backs off, finds the new leader
+background: 305 bids, 269 accepted, 36 rejected, 0 errors | leader n3, term 3, commit 326
   mrudul  bid      250  -> ok       Bid of 250 added [high 250 by mrudul]
-  (that bid took 2.08 s including failover)
-  new leader: n2
+  (that bid took 0.18 s including failover)
+  new leader: n3
   tanmay  bid      300  -> ok       Bid of 300 added [high 300 by tanmay]
   karan   bid      300  -> rejected Bid of 300 is not added because current highest bid is 300 [high 300 by tanmay]
 
-=== [  50.8s] restart n1: it replays its log from disk and catches up from the new leader
-  n1 back; replicas agree: True
+=== [  55.5s] restart n2: it replays its log from disk and catches up from the new leader
+background: 389 bids, 342 accepted, 47 rejected, 0 errors | leader n3, term 3, commit 414
+background: 473 bids, 419 accepted, 54 rejected, 0 errors | leader n3, term 3, commit 500
+background: 558 bids, 495 accepted, 63 rejected, 0 errors | leader n3, term 3, commit 587
+  n2 back; replicas agree: True
 
-=== [  59.3s] more bids after the restart
+=== [  71.3s] more bids after the restart
+background: 599 bids, 531 accepted, 68 rejected, 0 errors | leader n3, term 3, commit 630
   karan   bid      350  -> ok       Bid of 350 added [high 350 by karan]
   mrudul  bid      400  -> ok       Bid of 400 added [high 400 by mrudul]
 
-=== [  63.3s] waiting 20 s for the close (the leader's closer proposes CloseAuction)
+=== [  75.3s] waiting 16 s for the closes: auctions 2-4, then auction 1 last (the closer proposes CloseAuction)
+background: 599 bids, 531 accepted, 68 rejected, 0 errors | leader n3, term 3, commit 633
+background: 599 bids, 531 accepted, 68 rejected, 0 errors | leader n3, term 3, commit 633
+background: 599 bids, 531 accepted, 68 rejected, 0 errors | leader n3, term 3, commit 633
+background: 599 bids, 531 accepted, 68 rejected, 0 errors | leader n3, term 3, commit 634
   tanmay  bid      500  -> rejected Auction is already closed tanmay [high 400 by mrudul]
   closed=True winner='mrudul' bids=[('karan', 100), ('mrudul', 150), ('karan', 200), ('mrudul', 250), ('tanmay', 300), ('karan', 350), ('mrudul', 400)]
+  background bidders stopped; still running: none
 
-=== [  87.6s] the leader's summary worker asks the model for the result summary and replicates the text
-  summary after 0.0 s: 'A vintage clock auction ended with 7 bids from 3 bidders. The opening bid was 100 by karan, and the closing bid was 400 by mrudul, who won the item.'
+=== [  95.8s] the leader's summary workers ask the model for the four result summaries and replicate the texts
+  auction 1 summary read back 10.0 s after its close: 'A vintage clock auction ended with 7 bids from 3 bidders. The opening bid was 100 by karan, and the closing bid was 400 by mrudul, who won the item with that bid.'
+  auction 2 summary read back 50.0 s after its close: 'A film camera auction ended with 99 bids from 6 bidders. The opening bid was 29 by bg2, and the closing bid was 2639, also by bg2. bg2 won the auction with a bid of 2639.'
+  auction 3 summary read back 40.0 s after its close: 'pocket watch: bids placed 140, from 6 bidders. Opening bid 26, closing bid 3573. Winner bg6, with a winning bid of 3573.'
+  auction 4 summary read back 30.0 s after its close: 'A vinyl record player auction ended with 292 bids from 6 bidders. The opening bid was 8, and the closing bid was 8102, won by bg1.'
 
-=== [  91.6s] mrudul (the winner) pays 400 into ESCROW; tanmay (not the winner) tries and is refused
+=== [  99.8s] mrudul (the winner) pays 400 into ESCROW; tanmay (not the winner) tries and is refused
   tanmay  pay      400  -> rejected tanmay is not the winner: only the winner can pay [reference -]
-  mrudul  pay      400  -> ok       400 is held in escrow for auction 1 [reference PAY-4D3DC12C785E]
+  mrudul  pay      400  -> ok       400 is held in escrow for auction 1 [reference PAY-5F206439A03D]
   (payment: 0.00 s)
-  escrow now: status HELD, amount 400, payer mrudul, seller nisarg, payment_ref PAY-4D3DC12C785E, settlement_ref -
+  escrow now: status HELD, amount 400, payer mrudul, seller nisarg, payment_ref PAY-5F206439A03D, settlement_ref -
 
-=== [  95.6s] KILL -9 the leader n2 (term 2) AFTER the payment
-  n2 killed
+=== [ 103.8s] KILL -9 the leader n3 (term 3) AFTER the payment
+  n3 killed
 
-=== [  99.6s] the new leader shows the SAME escrow; then nisarg (the seller) releases it
-  escrow on the new leader: status HELD, amount 400, payer mrudul, seller nisarg, payment_ref PAY-4D3DC12C785E, settlement_ref -
+=== [ 107.8s] the new leader shows the SAME escrow; then nisarg (the seller) releases it
+  escrow on the new leader: status HELD, amount 400, payer mrudul, seller nisarg, payment_ref PAY-5F206439A03D, settlement_ref -
   same record as before the kill: True
-  nisarg  release       -> ok       Escrow released to the seller [reference REL-4D3DC12C785E]
-  escrow (seen by the winner): status RELEASED, amount 400, payer mrudul, seller nisarg, payment_ref PAY-4D3DC12C785E, settlement_ref REL-4D3DC12C785E
+  nisarg  release       -> ok       Escrow released to the seller [reference REL-5F206439A03D]
+  escrow (seen by the winner): status RELEASED, amount 400, payer mrudul, seller nisarg, payment_ref PAY-5F206439A03D, settlement_ref REL-5F206439A03D
 
-=== [ 107.7s] restart n2: it replays its log from disk and catches up from the new leader
-  n2 back; replicas agree: True
+=== [ 115.9s] background winners paid with their own clients; the seller releases auctions 2 and 4 and refunds 3
+  bg2   pay 2639 for auction 2 -> ok       2639 is held in escrow for auction 2 [reference PAY-59E56609FB2F]
+  bg6   pay 3573 for auction 3 -> ok       3573 is held in escrow for auction 3 [reference PAY-6531BDBE19E4]
+  bg1   pay 8102 for auction 4 -> ok       8102 is held in escrow for auction 4 [reference PAY-A16AE91108D5]
+  nisarg  release       -> ok       Escrow released to the seller [reference REL-59E56609FB2F]
+  nisarg  refund        -> ok       Escrow refunded to the winner [reference RFD-6531BDBE19E4]
+  nisarg  release       -> ok       Escrow released to the seller [reference REL-A16AE91108D5]
 
-=== [ 113.8s] price trends over the closed auctions: statistics in code, wording by the model
-  (price trends: 2.36 s)
-  auctions 1, with bids 1, lowest 400, highest 400, total bids 7
-  summary: 'There is 1 closed auction with bids; the lowest and highest winning bid are both 400. Due to only one auction having bids, the direction of price change cannot be determined.'
+=== [ 120.0s] restart n3: it replays its log from disk and catches up from the new leader
+  n3 back; replicas agree: True
 
-=== [ 120.1s] checker: every property, on what the clients saw + every node's final state
-PASS  history-well-formed  (checked 18)
-PASS  acked-writes-on-every-node-exactly-once  (checked 42)
+=== [ 127.6s] the escrow of every auction, at the end
+  auction 1: status RELEASED, amount 400, payer mrudul, seller nisarg, payment_ref PAY-5F206439A03D, settlement_ref REL-5F206439A03D
+  auction 2: status RELEASED, amount 2639, payer bg2, seller nisarg, payment_ref PAY-59E56609FB2F, settlement_ref REL-59E56609FB2F
+  auction 3: status REFUNDED, amount 3573, payer bg6, seller nisarg, payment_ref PAY-6531BDBE19E4, settlement_ref RFD-6531BDBE19E4
+  auction 4: status RELEASED, amount 8102, payer bg1, seller nisarg, payment_ref PAY-A16AE91108D5, settlement_ref REL-A16AE91108D5
+
+=== [ 131.6s] price trends over the closed auctions: statistics in code, wording by the model
+  (price trends: 2.50 s)
+  closed auctions 4, with at least one bid 4, lowest winning bid 400, highest winning bid 8102, total bids 538
+  summary: 'There were 4 closed auctions, all with bids. The lowest winning bid was 400, the highest was 8102, and winning bids rose from 400 to 8102 across the auctions.'
+
+=== [ 138.1s] background stall at each leader kill: the slowest background bid in flight around the kill
+  background stall during failover (n2 killed): 2.18 s
+  background stall during failover (n3 killed): n/a -- no background bid was in flight then (every background auction had closed)
+
+=== [ 142.1s] checker: every property, on what the clients saw + every node's final state
+PASS  history-well-formed  (checked 632)
+PASS  acked-writes-on-every-node-exactly-once  (checked 1680)
 PASS  replicas-identical  (checked 3)
-PASS  bids-strictly-increasing-winner-is-max  (checked 3)
-PASS  no-bid-accepted-after-close  (checked 28)
-PASS  rejections-consistent-with-final-state  (checked 3)
+PASS  bids-strictly-increasing-winner-is-max  (checked 12)
+PASS  no-bid-accepted-after-close  (checked 2152)
+PASS  rejections-consistent-with-final-state  (checked 71)
 PASS  unknown-outcome-at-most-once  (checked 0)
 PASS  at-most-one-leader-per-term  (checked 6)
-PASS  escrow-legal-and-at-most-one-payment  (checked 6)
-PASS  summary-at-most-one-on-closed-auction  (checked 3)
+PASS  escrow-legal-and-at-most-one-payment  (checked 21)
+PASS  summary-at-most-one-on-closed-auction  (checked 12)
 ALL PROPERTIES PASS
-
-timings of the slow steps:
-  model warm-up                                4.50 s
-  create auction incl. LLM description         1.87 s
-  assistant FAQ                                1.17 s
-  close -> summary visible                     0.00 s
-  payment                                      0.00 s
-  price trends                                 2.36 s
-  whole run (including the pauses)           125.16 s
 
 DEMO: ALL PROPERTIES PASS
 ```
 The leader's name, the terms, the reference values and the LLM's wording change
-from run to run. The lines that matter on camera are the two refusals (tanmay at
-27.5 s and at 91.6 s), the second kill's escrow check, and the last line.
+from run to run. The timings and the number of background bids change too (the
+background bidders race each other). The lines that matter on camera: the
+background status lines, the equal-bid refusal at 36.0 s, the two stall lines,
+the four escrow lines, and the last line.
 
 **Say at the end of the live run:** "Everything you just saw was printed by the
 cluster and by the checker. Now I'll replay the same run from its event log, so
-you can see the state of every node at each step."
+you can see the state of every node, and every auction, at each step."
 
 ---
 
 ## 2:45-6:45 The REPLAY of that run
 
-**Open:** `runs\demo-20261110-143237\replay.html` in a browser, full screen.
+**Open:** `runs\demo-20261110-150720\replay.html` in a browser, full screen.
 The banner at the top says it is a replay of a recorded run. Press Space to
 start, and set the speed to 0.5x. Use the arrow keys to move from one event to
-the next, or click a marker on the timeline.
+the next, or click a marker on the timeline. Hover over a marker to read its
+full text.
 
 **What is on screen:**
 - Three node cards: role, term, commit, applied and the first eight characters
@@ -218,49 +252,52 @@ the next, or click a marker on the timeline.
   node has the same digest at the same index. It says DIVERGED (red) only if
   two live nodes at the same index disagree. Amber **catching up** means the
   live nodes are at different indexes, which is normal lag after a write.
-- The auction card for the hero auction: item, open or closed, high bid and
-  bidder, winner, escrow (NONE, HELD, RELEASED), and the description and summary.
+- Four auction cards: item, open or closed, high bid and bidder, winner, escrow
+  (NONE, HELD, RELEASED, REFUNDED), and the description and summary.
 - The hero auction's bid list. Accepted bids are normal text, refused bids are
   greyed out with the reason.
-- Background bidders: the counters. In this run there are none, because the
-  background bidders are not built yet (see the table at the top).
+- Background bidders: the counters (bids, accepted, refused, errors). The
+  background bids are counted, not listed one by one.
 - The event log, which scrolls: step headings in bold, kills in red, elections
   in amber, escrow changes in green.
+- The timeline: short labels on two rows (`kill n2`, `leader n3`, `close #2`,
+  `pay #2`, `checker`). Where two labels would overlap, the label is left off
+  and the marker's tooltip still has its full text.
 
 **The markers, in order** (the times are the replay clock, `mm:ss`, from the
-recorded run):
+official run):
 
-| replay time | what happens | point at | say |
+| replay time | marker | point at | say |
 |---|---|---|---|
-| 00:05 | `new leader n1 (term 1)` | the leader card | "Startup. The three nodes elect a leader for term 1: n1." |
-| 00:13 | log in, four clients | the event log | "Each client is its own session. Logins are commands too, so every node knows the same sessions." |
-| 00:17 | create auction 1 | the auction card, the description | "The LLM wrote this description once, when the auction was created. It is stored as text, and the followers never call the model." |
-| 00:23 | bids karan 100, mrudul 150 | the bid list | "Normal bids. Each one is committed on a majority before it is answered." |
-| 00:27 | karan and tanmay both bid 200 | the two rows at 00:27 and 00:31 | "The same amount, at the same moment. Raft puts them in one order. karan's is accepted; tanmay's is refused, because the high bid is already 200. The refusal is the same on every node." |
-| 00:36 | the assistant answers | the event log, the FAQ line | "The assistant is told the live auction and answers from it: 'Yes... That would be 201.' Nothing is written to the log." |
-| 00:36-00:41 | KILL -9 n1, then `new leader n2 (term 2)` | the n1 card turns grey, the n2 card gets the leader border | "A real kill -9, not a pause. The other two nodes stop hearing from n1, one of them times out, asks for votes in a higher term, and wins." |
-| 00:50 | restart n1 | the n1 card comes back | "n1 reads its term, vote and log from disk, then catches up from the new leader." |
-| 01:03 | the close is awaited | the auction card still OPEN, then CLOSED at 01:27 | "The closer runs on every node, but only the leader proposes the close." |
-| 01:27 | CLOSED, mrudul wins at 400 | the auction card | "The close and the winner are part of the replicated state, so every node agrees on them." |
-| 01:31 | the summary appears | the auction card, the summary line | "The leader asked the model for a summary and replicated the text. It is stored like any other data. The numbers in it are checked against the facts in code." |
-| 01:35 | mrudul pays 400, tanmay refused | the escrow pill HELD | "Only the winner can pay, and only the winning amount. The leader calls the payment gateway once, and the gateway's reference travels in the command as plain data." |
-| 01:39 | KILL -9 n2, then `new leader n3 (term 3)` | n2 turns grey, n3 gets the border | "The second kill, after the payment. The new leader is n3." |
-| 01:45 | escrow read on the new leader | the escrow pill still HELD, same reference | "The same record, byte for byte: the escrow survived the leader's death." |
-| 01:47 | nisarg releases the escrow | the pill turns RELEASED | "The seller releases it. RELEASED is final." |
-| 01:51 | restart n2 | n2 comes back | "The last node back. Its state matches the other two." |
-| 01:53 | price trends | the event log | "Statistics in code: one closed auction, lowest and highest winning bid 400. The model only words the summary." |
-| 02:00 | the checker runs | the event log | "Every property the checker knows, run on what the clients saw and on each node's final state." |
-| 02:05 | the checker panel | the property list and the banner | **Stop here on ALL PROPERTIES PASS.** |
-
-**Not in this run, so do not show it:** escrow refunds. The refund path
-(auction 3, refunded by the seller) comes with the four-auction demo, which is
-not built yet.
+| 00:05 | `leader n2` | the leader card | "Startup. The three nodes elect a leader for term 1: n2." |
+| 00:14 | `create #1` | the auction card, the description | "The LLM wrote this description once, when the auction was created. It is stored as text, and the followers never call the model." |
+| 00:20 | `create #2-4` | the three new auction cards | "Three background auctions, with their own descriptions. They close 35, 45 and 55 seconds after the hero was created, so the hero closes last." |
+| 00:28 | `bidders on` | the background counters | "Six bidders, bg1 to bg6, each with its own client. They bid on the three background auctions. Nothing is printed for each bid; the counters show them." |
+| 00:32 | `bids` | the bid list | "Normal bids. Each one is committed on a majority before it is answered." |
+| 00:36 | `equal bids` | the two rows at 00:36 and 00:40 | "The same amount, at the same moment. Raft puts them in one order. karan's is accepted; tanmay's is refused, because the high bid is already 200. The refusal is the same on every node." |
+| 00:40 | `assistant` | the event log, the FAQ line | "The assistant is told the live auction and answers from it: 'Yes... That would be 201.' Nothing is written to the log." |
+| 00:49 | `kill n2`, then `failover` | the n2 card turns grey; the background counters keep moving | "A real kill -9, not a pause, while six background bidders are bidding. The other nodes stop hearing from n2, one of them times out, asks for votes in a higher term, and wins." |
+| 00:49 | `close #2` | the auction 2 card turns CLOSED | "Auction 2 closes at its scheduled time. Its winner is bg2 at 2639." |
+| 00:51 | `leader n3`, `pay #2` | the n3 card gets the border; auction 2 escrow turns HELD | "The new leader is n3. bg2 paid its own winning bid, with its own client, the moment auction 2 closed." |
+| 00:55 | `restart n2` | the n2 card comes back | "n2 reads its term, vote and log from disk, then catches up from the new leader." |
+| 00:59-01:09 | `close #3`, `pay #3`, `close #4`, `pay #4` | the auction cards | "The same thing for auctions 3 and 4: close at its time, and the winner pays automatically." |
+| 01:15 | `close wait` | the hero card still OPEN | "The hero waits for its own close. It closes last." |
+| 01:29 | `close #1` | the hero card CLOSED, mrudul at 400 | "The close and the winner are part of the replicated state, so every node agrees on them." |
+| 01:35 | `summaries` | the summary lines on the four cards | "The leader asked the model for a summary for each auction, and replicated the texts. They are stored like any other data, and the numbers are checked against the facts in code." |
+| 01:39 | `payment`, then `pay #1` | the escrow pill HELD | "Only the winner can pay, and only the winning amount. The leader calls the payment gateway once, and the gateway's reference travels in the command as plain data." |
+| 01:47 | `kill n3`, `escrow read` | n3 turns grey; the escrow record is the same | "The second kill, after the payment. The new leader, n1, reports the identical escrow record: the escrow survived the leader's death." |
+| 01:55 | `release #1`, `bg escrow` | the escrow pills | "The seller releases the hero's money. Then the seller releases auctions 2 and 4 and REFUNDS auction 3: the refund goes back to the winner." |
+| 01:59 | `restart n3` | n3 comes back | "The last node back. Its state matches the other two." |
+| 02:11 | `trends` | the event log | "Statistics in code: four closed auctions, lowest winning bid 400, highest 8102. The model only words the summary." |
+| 02:18 | `stall` | the event log, the stall lines | "The slowest background bid during the first kill took 2.18 seconds: that is the failover, seen from a bidder. The second kill had no background bid in flight: every background auction had closed by then." |
+| 02:27 | `checker` | the property list and the banner | **Stop here on ALL PROPERTIES PASS.** |
 
 **Expected (the replay's end state, as shown on screen):** the checker panel
 lists the ten properties, all PASS, and the banner says `ALL PROPERTIES PASS`.
-The clock reads `02:06 / 02:06`. The replay PNG at the end of the run is
-`runs\demo-20261110-143237\replay-end.png`; the PNG just after the first kill is
-`runs\demo-20261110-143237\replay-kill.png`.
+The clock reads `02:28 / 02:28`. The four auction cards read: #1 RELEASED, #2
+RELEASED, #3 REFUNDED, #4 RELEASED. The PNG just after the first kill is
+`runs\demo-20261110-150720\replay-kill.png`; the PNG at the end of the run is
+`runs\demo-20261110-150720\replay-end.png`.
 
 **Say at the end of the replay:** "That was the same run, step by step, from
 its own event log. Every number on screen came from a recorded event, and the
@@ -311,10 +348,12 @@ network partitions between real processes, no clock skew, no disk faults. The
 payment gateway is a mock, and a payout is not atomic with the Raft commit. The
 model's text is stored, not verified; numbers in a summary are checked against
 the facts, but the check cannot catch two valid numbers swapped, or a number
-written as words. The live demo has one auction, so the four-auction version
-with refunds is not shown. Catch-up is one RPC per missing entry, a restart
-replays the whole log, and the client sees about 2 seconds of failover on
-Windows. And chaos runs are seeded but not deterministic: they use real
+written as words. The background bidders are clients of the same cluster, all
+on one machine, at about 17 bids a second. The second leader kill is not under
+load: the hero closes last, and its payment waits for that close, so every
+background auction has already closed. Catch-up is one RPC per missing entry, a
+restart replays the whole log, and the client sees about 2 seconds of failover
+on Windows. And chaos runs are seeded but not deterministic: they use real
 processes and wall-clock time. A deterministic simulator on a virtual clock is
 the natural next step."
 
@@ -328,8 +367,9 @@ the natural next step."
 | `leader:` never prints | nodes didn't start; check `runs\demo-<time>\logs\n*.log` | read the log's last lines |
 | the warm-up takes 15 s or more | Ollama had unloaded the model | say so; it is a one-time cost |
 | `(no answer: the assistant is unavailable ...)` | Ollama is not running | start it; the auction carried on, which is also worth saying |
-| the kill step's bid takes about 2 s | expected (T18) | say so |
+| the first kill's bid takes about 2 s | expected (T18) | say so |
+| `background stall during failover … n/a` for the first kill | no background bid was in flight at that moment | say so; it is the same as the second kill |
 | the replay shows amber **catching up** | live nodes at different indexes: normal lag after a write | say so; it is not a divergence |
 | the replay shows **DIVERGED** (red) | two live nodes at the same index with different digests: a real bug | stop recording, keep the run directory |
 | the checker prints `FAIL` | read the evidence lines under the property | keep the run directory |
-| `replay.py` says `no events.jsonl` | the run was made before the event log existed | use `runs\demo-20261110-143237` |
+| `replay.py` says `no events.jsonl` | the run was made before the event log existed | use `runs\demo-20261110-150720` |
