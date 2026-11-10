@@ -36,7 +36,7 @@ import uuid
 import grpc
 
 from auction import state as commands
-from auction.state import AuctionState
+from auction.state import AuctionState, summary_of
 from common import time_conv
 from generated import auction_pb2, auction_pb2_grpc
 from replication.replicator import LocalReplicator
@@ -77,7 +77,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
 
         request_id = str(uuid.uuid4())
         try:
-            return self._llm.get_llm_answer(
+            _, description = self._llm.get_llm_answer(
                 request_id=request_id,
                 query="",
                 context={
@@ -85,6 +85,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
                     "attributes": dict(request.attributes),
                 },
             )
+            return description
         except grpc.RpcError:
             # An LLM outage must never block auction creation (llm.proto's
             # failure note). Degrade to no description; the auction still
@@ -182,6 +183,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
                 description = auction["description"]
                 closed = auction["closed"]
                 winner = auction["winner"]
+                summary = summary_of(auction)
                 entries = list(auction["bids"])
             if auction is None:
                 return auction_pb2.GetAuctionResponse(
@@ -213,6 +215,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
             bids=pb_bids,
             winner=winner.bidder if winner is not None else "",
             description=description,
+            summary=summary,
         )
         return auction_pb2.GetAuctionResponse(
             result=auction_pb2.Result(success=True, reason="ok"),

@@ -11,6 +11,8 @@ llm.proto's service comment documents a dispatch:
                                          -> GenerateItemDescription
     getLLMAnswer(id, -,                   <closed auction + bid history>)
                                          -> SummariseAuctionResult
+    getLLMAnswer(id, -,                   <closed auctions' price history>)
+                                         -> SummarisePriceTrends      (chunk 7)
 
 That comment describes the wire-level mapping; it is not itself a callable.
 LLMClient.get_llm_answer is the real function with that name and those
@@ -24,6 +26,18 @@ lays out:
       in context
     query falsy, "bid_history" -> SummariseAuctionResult
       in context
+    query falsy, "price_history" -> SummarisePriceTrends
+      in context
+
+It returns (request_id, answer), as the handout's signature says: the pair
+comes from the RESPONSE, so a server that answered a different request would
+show. (M1 returned the answer string only; chunk 7 changed it, and the one
+caller, AuctionServicer._describe, with it. docs/decisions.md, C12.)
+
+Every call carries a DEADLINE (`deadline`, default llm_config.APP_DEADLINE_SECONDS).
+Without one a hung LLM process would hold a handler thread until the client's
+own timeout. A call that runs out raises grpc.RpcError with DEADLINE_EXCEEDED
+like any other failure; callers treat it as an outage (chunk 7, R9).
 
 `context` is a plain dict here, not an AuctionContext message -- this
 module is the one place that knows how to build the right protobuf from
@@ -63,15 +77,22 @@ class LLMClient:
     None builds a real channel + stub against `address`.
     """
 
-    def __init__(self, address: str = f"localhost:{llm_config.PORT}", stub=None):
+    def __init__(
+        self,
+        address: str = f"localhost:{llm_config.PORT}",
+        stub=None,
+        deadline: float = llm_config.APP_DEADLINE_SECONDS,
+    ):
+        self._deadline = deadline
         if stub is not None:
             self._stub = stub
         else:
             self._channel = grpc.insecure_channel(address)
             self._stub = llm_pb2_grpc.LLMServiceStub(self._channel)
 
-    def get_llm_answer(self, request_id: str, query: str, context: dict) -> str:
-        """The handout's getLLMAnswer(requestId, query, context) -> answer.
+    def get_llm_answer(self, request_id: str, query: str, context: dict) -> tuple:
+        """The handout's getLLMAnswer(requestId, query, context) ->
+        (requestId, answer).
 
         `context` is required (never None) so a caller cannot forget it;
         pass {} for the FAQ job's "no live auction" case.
@@ -83,7 +104,7 @@ class LLMClient:
             )
             if "auction" in context:
                 request.auction.CopyFrom(_to_auction_context(context["auction"]))
-            response = self._stub.AnswerBiddingQuestion(request)
+            response = self._stub.AnswerBiddingQuestion(request, timeout=self._deadline)
 
         elif "attributes" in context:
             # (b) item description. context: {"item": str, "attributes": dict}.
@@ -95,7 +116,8 @@ class LLMClient:
                         llm_pb2.Attribute(key=key, value=value)
                         for key, value in context["attributes"].items()
                     ],
-                )
+                ),
+                timeout=self._deadline,
             )
 
         elif "bid_history" in context:
@@ -112,13 +134,34 @@ class LLMClient:
                         )
                         for point in context["bid_history"]
                     ],
-                )
+                ),
+                timeout=self._deadline,
+            )
+
+        elif "price_history" in context:
+            # (c') price trends. context: {"price_history": [{auction_id, item,
+            # opening_bid, winning_bid, bid_count}, ...]}, oldest first.
+            response = self._stub.SummarisePriceTrends(
+                llm_pb2.PriceTrendsRequest(
+                    request_id=request_id,
+                    auctions=[
+                        llm_pb2.ClosedAuctionPoint(
+                            auction_id=point["auction_id"],
+                            item=point["item"],
+                            opening_bid=point["opening_bid"],
+                            winning_bid=point["winning_bid"],
+                            bid_count=point["bid_count"],
+                        )
+                        for point in context["price_history"]
+                    ],
+                ),
+                timeout=self._deadline,
             )
 
         else:
             raise ValueError(
                 "get_llm_answer: query is empty and context matches none of "
-                "'attributes' or 'bid_history' -- nothing to dispatch to"
+                "'attributes', 'bid_history' or 'price_history' -- nothing to dispatch to"
             )
 
-        return response.answer
+        return response.request_id, response.answer

@@ -27,7 +27,7 @@ class FakeLLMClient:
         self.calls.append((request_id, query, context))
         if self.error is not None:
             raise self.error
-        return self.answer
+        return request_id, self.answer
 
 
 class FakeContext:

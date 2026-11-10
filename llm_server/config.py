@@ -17,6 +17,14 @@ MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 # is actually wrong -- never on a merely slow call. See docs/design-notes.md.
 TIMEOUT_SECONDS = 30.0
 
+# The deadline the APPLICATION server puts on every call to this server
+# (server/llm_client.py). Shorter than TIMEOUT_SECONDS on purpose: the caller
+# must give up first, so a stuck model never holds a handler thread longer than
+# this, and the Ollama timeout stays a backstop inside the LLM server. A cold
+# model load measured 15.75 s on the dev machine (docs/payment-and-llm.md), so
+# this leaves room for one; a call that takes longer degrades like an outage.
+APP_DEADLINE_SECONDS = 25.0
+
 # 50051 is the auction server (server/serve.py). The LLM server is a
 # separate process on a separate node, so it needs its own port.
 PORT = 50052
@@ -40,3 +48,4 @@ PORT = 50052
 MAX_TOKENS_FAQ = 80           # "a sentence or two"
 MAX_TOKENS_DESCRIPTION = 130  # a short paragraph
 MAX_TOKENS_SUMMARY = 170      # a short paragraph, plus room for numbers
+MAX_TOKENS_TRENDS = 170       # same shape as a result summary

@@ -150,6 +150,11 @@ class LLMServiceStub:
                 request_serializer=llm__pb2.AuctionSummaryRequest.SerializeToString,
                 response_deserializer=llm__pb2.LLMAnswerResponse.FromString,
                 _registered_method=True)
+        self.SummarisePriceTrends = channel.unary_unary(
+                '/llm.LLMService/SummarisePriceTrends',
+                request_serializer=llm__pb2.PriceTrendsRequest.SerializeToString,
+                response_deserializer=llm__pb2.LLMAnswerResponse.FromString,
+                _registered_method=True)
 
 
 class LLMServiceServicer:
@@ -277,6 +282,17 @@ class LLMServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SummarisePriceTrends(self, request, context):
+        """(c') The historical-pricing half of (c): a trend over SEVERAL closed
+        auctions, where SummariseAuctionResult describes one. Added in chunk 7
+        (R6) because "summarisation of auction results and historical pricing
+        trends" is two statements, and the second needs a list, not one auction.
+        getLLMAnswer(id, -, <price_history>) -> SummarisePriceTrends.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LLMServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -293,6 +309,11 @@ def add_LLMServiceServicer_to_server(servicer, server):
             'SummariseAuctionResult': grpc.unary_unary_rpc_method_handler(
                     servicer.SummariseAuctionResult,
                     request_deserializer=llm__pb2.AuctionSummaryRequest.FromString,
+                    response_serializer=llm__pb2.LLMAnswerResponse.SerializeToString,
+            ),
+            'SummarisePriceTrends': grpc.unary_unary_rpc_method_handler(
+                    servicer.SummarisePriceTrends,
+                    request_deserializer=llm__pb2.PriceTrendsRequest.FromString,
                     response_serializer=llm__pb2.LLMAnswerResponse.SerializeToString,
             ),
     }
@@ -477,6 +498,33 @@ class LLMService:
             target,
             '/llm.LLMService/SummariseAuctionResult',
             llm__pb2.AuctionSummaryRequest.SerializeToString,
+            llm__pb2.LLMAnswerResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SummarisePriceTrends(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/llm.LLMService/SummarisePriceTrends',
+            llm__pb2.PriceTrendsRequest.SerializeToString,
             llm__pb2.LLMAnswerResponse.FromString,
             options,
             channel_credentials,

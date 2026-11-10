@@ -119,6 +119,14 @@ service LLMService {
   // (c) Summarisation of auction results and price history.
   rpc SummariseAuctionResult(AuctionSummaryRequest)
       returns (LLMAnswerResponse);
+
+  // (c') The historical-pricing half of (c): a trend over SEVERAL closed
+  // auctions, where SummariseAuctionResult describes one. Added in chunk 7
+  // (R6) because "summarisation of auction results and historical pricing
+  // trends" is two statements, and the second needs a list, not one auction.
+  // getLLMAnswer(id, -, <price_history>) -> SummarisePriceTrends.
+  rpc SummarisePriceTrends(PriceTrendsRequest)
+      returns (LLMAnswerResponse);
 }
 
 
@@ -278,4 +286,25 @@ message LLMAnswerResponse {
   // arrives at all, the model answered. If it did not answer, the call
   // fails with a status code instead.
   string answer = 2;
+}
+
+
+// --- Price trends (chunk 7) -----------------------------------------------
+
+// One closed auction, reduced to the figures a price trend needs. The
+// application server computes these from replicated state; the model only
+// puts them into words.
+message ClosedAuctionPoint {
+  int64 auction_id = 1;
+  string item = 2;             // seller-chosen: UNTRUSTED text, like an attribute
+  int64 opening_bid = 3;       // first bid; 0 if nobody bid
+  int64 winning_bid = 4;       // highest bid; 0 if nobody bid
+  int64 bid_count = 5;
+}
+
+message PriceTrendsRequest {
+  string request_id = 1;
+  // Oldest first. An empty list is INVALID_ARGUMENT: with nothing to work
+  // from the model would invent a trend.
+  repeated ClosedAuctionPoint auctions = 2;
 }
