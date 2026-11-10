@@ -5,7 +5,8 @@
         --data-dir data/n1 --llm-addr 127.0.0.1:50052
 
 Two gRPC servers, on two ports (docs/decisions.md, A9):
-  CLIENT port   AuthService + AuctionService, behind the AuthInterceptor.
+  CLIENT port   AuthService + AuctionService + PaymentService + AssistantService +
+                BusinessService, behind the AuthInterceptor.
                 What clients dial.
   PEER port     RaftService + StatusService, NO interceptor. Raft RPCs come from the
                 other nodes and carry no session token; putting them behind
@@ -27,6 +28,8 @@ Wiring, one object each:
   RaftNode         FileStorage on --data-dir (term, vote, log, fsync'd).
   RaftReplicator   the handlers' write path: propose, wait, map errors.
   AuctionCloser    on every node; proposes only while leader.
+  SummaryWorker    on every node; asks the LLM for a result summary of each
+                   closed auction and proposes it, only while leader.
 
 Restart: the data dir keeps the log. The state machine starts empty and is
 rebuilt by replaying the log through apply_fn as the commit index is
@@ -38,11 +41,17 @@ import logging
 import random
 from concurrent import futures
 from dataclasses import dataclass
-from typing import Optional
 
 import grpc
 
-from generated import auction_pb2_grpc, raft_pb2_grpc, status_pb2_grpc
+from generated import (
+    assistant_pb2_grpc,
+    auction_pb2_grpc,
+    business_pb2_grpc,
+    payment_pb2_grpc,
+    raft_pb2_grpc,
+    status_pb2_grpc,
+)
 from llm_server import config as llm_config
 from raft.file_storage import CorruptStorageError, FileStorage
 from raft.node import DEFAULT_ELECTION_TIMEOUT, DEFAULT_HEARTBEAT_INTERVAL, RaftNode
@@ -51,12 +60,17 @@ from raft.servicer import RaftServicer
 from raft.transport import GrpcTransport
 from replication.replicator import DEFAULT_TIMEOUT, RaftReplicator
 from replication.state_machine import StateMachine
+from server.assistant_servicer import AssistantServicer
 from server.auction_servicer import AuctionServicer
 from server.auth_interceptor import AuthInterceptor
 from server.auth_servicer import AuthServicer
+from server.business_servicer import BusinessServicer
 from server.closer import DEFAULT_INTERVAL_SECONDS, AuctionCloser
-from server.status_servicer import StatusServicer
 from server.llm_client import LLMClient
+from server.payment_gateway import MockPaymentGateway
+from server.payment_servicer import PaymentServicer
+from server.status_servicer import StatusServicer
+from server.summarizer import SummaryWorker
 from sessions.store import SessionStore
 
 log = logging.getLogger("server.serve")
@@ -108,7 +122,8 @@ class AuctionNode:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         propose_timeout: float = DEFAULT_TIMEOUT,
         closer_interval: float = DEFAULT_INTERVAL_SECONDS,
-        rng: Optional[random.Random] = None,
+        rng: random.Random | None = None,
+        payment_gateway=None,
     ):
         if node_id in peers:
             raise ValueError("--peers must not include this node's own id")
@@ -133,14 +148,27 @@ class AuctionNode:
         self.replicator = RaftReplicator(self.raft, client_addrs, timeout=propose_timeout)
         sessions = SessionStore(self.state_machine.sessions, self.replicator)
         self.closer = AuctionCloser(self.state_machine.auctions, self.replicator, closer_interval)
+        self.summarizer = SummaryWorker(self.state_machine.auctions, llm_client, self.replicator)
 
         self.client_server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=CLIENT_WORKERS, thread_name_prefix=f"{node_id}-client"),
             interceptors=[AuthInterceptor(sessions, self.replicator)],
         )
         auction_pb2_grpc.add_AuthServiceServicer_to_server(AuthServicer(sessions), self.client_server)
-        auction_pb2_grpc.add_AuctionServiceServicer_to_server(
-            AuctionServicer(self.state_machine.auctions, llm_client, self.replicator), self.client_server
+        auction_servicer = AuctionServicer(self.state_machine.auctions, llm_client, self.replicator)
+        auction_pb2_grpc.add_AuctionServiceServicer_to_server(auction_servicer, self.client_server)
+        # Payment and escrow. The gateway is this node's own in-process stub:
+        # only the leader's handler ever calls it (docs/decisions.md, chunk 7).
+        self.payment_gateway = payment_gateway if payment_gateway is not None else MockPaymentGateway()
+        payment_servicer = PaymentServicer(self.state_machine.auctions, self.payment_gateway, self.replicator)
+        payment_pb2_grpc.add_PaymentServiceServicer_to_server(payment_servicer, self.client_server)
+        # The LLM, wired in: leader-only FAQ / description / price trends.
+        assistant_servicer = AssistantServicer(self.state_machine.auctions, llm_client, self.replicator)
+        assistant_pb2_grpc.add_AssistantServiceServicer_to_server(assistant_servicer, self.client_server)
+        # R12: processBusinessRequest. It dispatches to the three servicers above (the same
+        # objects, so there is one implementation of every operation), behind the same interceptor.
+        business_pb2_grpc.add_BusinessServiceServicer_to_server(
+            BusinessServicer(auction_servicer, payment_servicer, assistant_servicer), self.client_server
         )
         self._bind(self.client_server, host, client_port, "client")
 
@@ -167,12 +195,14 @@ class AuctionNode:
         self.raft.start()
         self.client_server.start()
         self.closer.start()
+        self.summarizer.start()
 
     def stop(self):
         """Stop serving clients, then Raft. The storage is closed under the
         node lock, so a handler still inside a write finishes first and no
         write can land after (same fence as the tests' crash())."""
         self.closer.stop()
+        self.summarizer.stop()
         self.client_server.stop(grace=None).wait()
         self.peer_server.stop(grace=None).wait()
         self.raft.stop()
@@ -191,6 +221,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--peers", default="", help="the OTHER nodes: id=host:peer_port:client_port,...")
     p.add_argument("--data-dir", required=True, help="this node's own directory for term, vote and log")
     p.add_argument("--llm-addr", default=f"127.0.0.1:{llm_config.PORT}", help="LLM server host:port")
+    p.add_argument("--llm-deadline", type=float, default=llm_config.APP_DEADLINE_SECONDS,
+                   help="seconds this node waits for the LLM server before treating it as down")
     p.add_argument("--host", default="127.0.0.1", help="interface to bind (default: local only)")
     p.add_argument("--election-timeout-min", type=float, default=DEFAULT_ELECTION_TIMEOUT[0])
     p.add_argument("--election-timeout-max", type=float, default=DEFAULT_ELECTION_TIMEOUT[1])
@@ -220,7 +252,7 @@ def main(argv=None):
 
     node = AuctionNode(
         args.node_id, args.host, args.client_port, args.peer_port, peers, storage,
-        LLMClient(args.llm_addr),
+        LLMClient(args.llm_addr, deadline=args.llm_deadline),
         election_timeout=(args.election_timeout_min, args.election_timeout_max),
         heartbeat_interval=args.heartbeat,
     )
