@@ -503,6 +503,7 @@ button.active { border-color: var(--info); background: #0e2a44; color: #cfe6ff; 
 .mark .label { position: absolute; left: 6px; white-space: nowrap; font-size: 14px; color: var(--muted); }
 .mark .label.r0 { top: 0; } .mark .label.r1 { top: 22px; }
 .mark .label.flip { left: auto; right: 6px; }
+.mark .label.hidden { display: none; }
 .mark.step .label { color: #c9d1d9; }
 .mark.kill .label { color: #ffb4ad; font-weight: 700; }
 .mark.election .label { color: #ffe08a; font-weight: 700; }
@@ -749,10 +750,11 @@ button.active { border-color: var(--info); background: #0e2a44; color: #cfe6ff; 
   }
 
   // ---- the timeline: markers for every step, kill and election --------------------
-  // Short labels on two rows. Each marker takes the first row where its label does
-  // not run into the previous label on that row; if neither row is free, the row that
-  // frees up first. The full text is the tooltip (title). Estimate: 7.6 px per
-  // character at 14 px.
+  // Short labels on two rows. A label takes the first row where it does not run into
+  // the label before it. Where neither row is free, the label is HIDDEN, not drawn over
+  // another one: the marker stays, and its full text is the tooltip (title). A label
+  // near the right edge goes to the left of its marker, and takes that space.
+  // Estimate: 7.6 px per character at 14 px.
   function buildMarkers() {
     var box = $("marks");
     var width = $("track").clientWidth || 1;
@@ -761,14 +763,15 @@ button.active { border-color: var(--info); background: #0e2a44; color: #cfe6ff; 
     D.markers.forEach(function (m) {
       var x = D.duration > 0 ? (m.t / D.duration) * width : 0;
       var labelWidth = m.label.length * 7.6 + 10;
+      var flip = x + labelWidth > width;
+      var start = flip ? x - labelWidth : x;
       var row = -1;
-      for (var r = 0; r < rowEnd.length; r++) { if (rowEnd[r] <= x) { row = r; break; } }
-      if (row < 0) { row = rowEnd[0] <= rowEnd[1] ? 0 : 1; }
-      rowEnd[row] = x + labelWidth;
-      var flip = x + labelWidth > width;   // near the right edge: the label goes to the left of its marker
+      for (var r = 0; r < rowEnd.length; r++) { if (rowEnd[r] <= start) { row = r; break; } }
+      var shown = row >= 0;
+      if (shown) { rowEnd[row] = flip ? x : x + labelWidth; }
       html += '<div class="mark ' + m.kind + '" data-t="' + m.t + '" style="left:' + (x / width * 100) + '%" title="' +
-        esc(mmss(m.t) + "  " + (m.text || m.label)) + '"><span class="label r' + row + (flip ? " flip" : "") + '">' +
-        esc(m.label) + "</span></div>";
+        esc(mmss(m.t) + "  " + (m.text || m.label)) + '"><span class="label r' + (shown ? row : 0) +
+        (flip ? " flip" : "") + (shown ? "" : " hidden") + '">' + esc(m.label) + "</span></div>";
     });
     box.innerHTML = html;
     box.querySelectorAll(".mark").forEach(function (el) {
