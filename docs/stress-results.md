@@ -76,7 +76,7 @@ both.
 
 | election timeout | heartbeat | kills | `t_elect` min / p50 / p95 / max | `t_write` min / p50 / p95 / max | terms at the kills |
 |---|---|---:|---|---|---|
-| **0.5-1.0 s (default)** | 0.1 s | 20 | 867 / **894** / 1 114 / 1 118 ms | 2 178 / **2 209** / 2 222 / 2 408 ms | 1 → 22: one term per kill |
+| **0.5-1.0 s (default)** | 0.1 s | 20 | 867 / **892.7** / 1 114 / 1 118 ms | 2 178 / **2 209** / 2 222 / 2 408 ms | 1 → 22: one term per kill |
 | 0.15-0.3 s (paper's recommendation) | 0.05 s | 17 * | 440 / **462** / 681 / 875 ms | 374 / **2 220** / 2 263 / 2 419 ms | 2 → 68 in 17 kills |
 | 0.15-0.15 s (no randomness) | 0.05 s | 10 | 2.9 / 11.6 / 15.9 / 15.9 **s** (5 of 10 had no leader within 30 s) | 3.6 / 12.6 / 16.7 / 16.7 s | 1 → 1 866 |
 
@@ -120,7 +120,7 @@ trials) was 513ms."* It recommends 150-300 ms.
   round fsyncs on both sides, and the paper crashed the leader at a random
   point *within* its heartbeat interval, the same as our kill at an arbitrary
   moment. Plus three Python processes and a client sharing one machine.
-- **0.5-1.0 s:** median 894 ms, roughly the expected minimum of two
+- **0.5-1.0 s:** median 892.7 ms, roughly the expected minimum of two
   followers' random timeouts in [0.5, 1.0] s, plus the time since the last
   heartbeat, plus one vote round with an fsync on each side.
 
