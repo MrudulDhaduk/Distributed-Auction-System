@@ -165,13 +165,16 @@ A3, A7, A10, R2, T1. Evidence: `replicas-identical` compares full
 canonical JSON.
 
 **15. What does your checker prove, and what doesn't it?**
-For one recorded run, it proves that the eight properties hold over what the
-clients saw and every node's final state. Each property has a test showing it
+For one recorded run, it proves that the ten properties hold over what the
+clients saw and every node's final state (eight from before chunk 7, plus
+`escrow-legal-and-at-most-one-payment` and
+`summary-at-most-one-on-closed-auction`). Each property has a test showing it
 can fail. It's not a proof over all executions: a seed fixes only the fault
 schedule. It isn't a linearizability check. It looks at final states, except
 for leader sightings, which can miss a leader that lived under 50 ms. It
 covers process faults only, on one machine with one clock (T11 needs that).
-And the workload never reads.
+Since chunk 7 the workload does read (payers read `GetAuction`, sellers read
+`GetEscrow`), so read-index is exercised under chaos.
 → `checker/properties.py` `check_all`; `tests/test_checker.py`; T9, T10,
 T11; [testing-and-chaos.md](testing-and-chaos.md) §4 and Known gaps 2, 4, 5.
 
@@ -189,15 +192,48 @@ T11; [testing-and-chaos.md](testing-and-chaos.md) §4 and Known gaps 2, 4, 5.
 - *"UNAVAILABLE: was my bid placed?"* Maybe. Retry with the same seq, and it
   happens exactly once (A6, A11).
 
+### Chunk 7: payment, the LLM, the handout's names
+
+- *"Where does the money move? Three nodes, one charge?"* Only the leader's
+  handler calls the mock gateway, before it proposes. The command carries the
+  gateway's reference as data. `apply()` never does I/O (C2,
+  `PaymentServicer.Pay`).
+- *"A client retries a payment after the leader died. Charged twice?"* No. The
+  reference is a hash of the client's `(client_id, seq)`, so a new leader's
+  gateway produces the same one, and `apply()` accepts one payment per auction
+  anyway. A retry of a committed payment is answered from the replicated
+  dedupe table (C3, C4).
+- *"Why propose a payment you know will be refused?"* Because "already paid"
+  may mean "you are retrying and it worked". Only the dedupe table can tell (C3).
+- *"The LLM server is down or hangs."* Every call has a 25 s deadline. The
+  client gets "the assistant ... ; the auction is unaffected" in the response
+  body, not a gRPC error (which `ClusterClient` would retry for 30 s). Bidding,
+  creating and closing carry on (C12, C13; `tests/test_assistant_grpc.py`).
+- *"The leader dies after the close, before the summary."* The summary worker
+  finds work by scanning the replicated state, so the new leader sees "closed,
+  no summary" and writes it (C16). A test crashes the leader at exactly that
+  point.
+- *"Is LLM output in the log?"* Only its text, as an ordinary string, in
+  `SetDescription` / `RecordSummary` / `CreateAuction.description`. Replay never
+  calls the model (llm.proto, "call first, replicate second").
+- *"Where are `post`, `get` and `processBusinessRequest`?"* `ClusterClient.post`
+  and `.get` in `client/auction_client.py` are the handout's signatures over typed
+  RPCs (C9). `processBusinessRequest` is a real server RPC,
+  `BusinessServicer.ProcessBusinessRequest`: it parses a JSON payload and calls
+  the existing handlers with the same gRPC context, behind the same auth
+  interceptor, so every leader and auth rule applies. `ClusterClient.process_business_request`
+  calls it (C19). Weak spot: the payload is untyped, so it is validated by hand.
+- *"Your storage reported corruption in a test."* It was doing its job. pytest's
+  fd-level capture made a recycled Windows handle carry a gRPC log line into
+  `log.bin`. Reproduced on pre-chunk-7 code; gone with `--capture=sys` (C21).
+
 ---
 
 ## Things I can't fully answer yet
 
-1. **Read-index under chaos.** The chaos workload only writes
-   (`harness/workload.py` has no `get_auction`/`list_auctions`). So the
-   "built after the round" argument ([auction-on-raft.md](auction-on-raft.md)
-   §16 asked for it to be checked in step 7) is covered by unit tests and the
-   demo's two reads only.
+1. **Read-index under chaos.** Closed in chunk 7 for the Payer and Seller
+   actors (they read), but the chaos run uses a canned-answer LLM, so the
+   FAQ/trends reads are covered by unit and gRPC tests only.
 2. **The original 10 s stall (R9).** The no-op removes the mechanism I
    blamed, but the stall itself was never reproduced (0 in a 150-seed repro).
 3. **Power loss on Windows.** Whether NTFS can lose the latest `os.replace`.
@@ -211,11 +247,19 @@ T11; [testing-and-chaos.md](testing-and-chaos.md) §4 and Known gaps 2, 4, 5.
    replica's applier halts at that index (fail-stop, R3).
    [raft-replication.md](raft-replication.md) §8 said to check this. I haven't
    found a test that feeds `apply()` hostile values.
-6. **Problem-statement items that weren't built:** the mock payment/escrow
-   service and `ExtendAuction`. The auction server never calls the LLM's FAQ
-   or result-summary RPCs (they exist and can be called directly). The
-   dashboard shows a digest, not each node's high bid. And §6.3's "re-executed"
-   is only true of the schedule (T9).
+6. **Problem-statement items that weren't built:** `ExtendAuction` (the
+   anti-snipe stretch goal). The dashboard shows a digest, not each node's high
+   bid. §6.3's "re-executed" is only true of the schedule (T9). Payment and the
+   LLM wiring ARE built now (chunk 7); their known gaps are in
+   [payment-and-llm.md](payment-and-llm.md) section 4: a gateway payout cannot be
+   undone and is not atomic with the commit, the model's text is not tested for
+   truth, and the model can still get a number wrong (one live summary wrote 40 for 400, C23).
+9. **The stale-handle explanation (C21).** The fix is measured (0 failures in
+   24 runs vs 11 of 14), the mechanism is inferred.
+10. **One test failure never explained.** `test_the_cluster_client_pays_and_reads_the_escrow_across_a_leader_kill`
+   failed about twice in 78 early repeat runs (the client gave up after 30 s; one failure was captured, one was not). I made
+   the test wait for the new leader like its siblings and could not reproduce it
+   in 150 further runs, 30 of them under heavy CPU load. Root cause unknown.
 7. **M1's O(bids) `apply()`.** That's your code. If asked why it isn't O(1):
    keeping the max in the auction would change `apply()`'s logic, which the
    chunks were told not to do ([testing-and-chaos.md](testing-and-chaos.md)
@@ -236,6 +280,7 @@ T11; [testing-and-chaos.md](testing-and-chaos.md) §4 and Known gaps 2, 4, 5.
 | 4 | `replication/state_machine.py` | `apply_fn`, `_dispatch`, `_high_bid` | The §8 dedupe table, and where Raft meets your M1 `apply()`: Q11, Q14 | [auction-on-raft.md](auction-on-raft.md) §4 |
 | 5 | `server/auction_servicer.py` + `replication/replicator.py` | `PlaceBid`, `CreateAuction`, `GetAuction`; `submit`, `read_barrier` | The write path end to end, determinism at the edge: Q14 | [auction-on-raft.md](auction-on-raft.md) §2 |
 | 6 | `checker/properties.py` | `check_all`, then each `check_*` | What is proven and what isn't: Q15 | [testing-and-chaos.md](testing-and-chaos.md) §4 |
+| 7 | `auction/state.py` (escrow and summary rules), `server/payment_servicer.py`, `server/summarizer.py`, `server/assistant_servicer.py` | `payment_rejection`, `Pay`, `SummaryWorker.tick`, `AskAssistant` | Chunk 7: where the gateway and the model sit relative to `apply()` | [payment-and-llm.md](payment-and-llm.md) |
 
 Keep [decisions.md](decisions.md) open beside them. Every non-obvious line
 has an entry there with its own viva question.

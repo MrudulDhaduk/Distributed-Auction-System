@@ -4,10 +4,21 @@ An online auction (log in, create an auction, bid, automatic close, one winner)
 replicated across three servers with **Raft, implemented from the paper**
 (Ongaro & Ousterhout, extended version; no Raft library). Python 3 and gRPC.
 Every state change is a command in the Raft log, applied by one deterministic
-`apply()` on every node, so all replicas hold the same auctions. A local LLM
-writes item descriptions, and its text is replicated as plain data.
+`apply()` on every node, so all replicas hold the same auctions. After an
+auction closes, its winner pays into a mock **escrow** and the seller releases
+or refunds it. A local **LLM on a separate server** answers bidding questions,
+writes item descriptions and result summaries, and summarises price trends;
+its text is replicated as plain data, never as a call.
 Built for CS G623 (Advanced Operating Systems). It ships with a seeded chaos
 harness and a property checker that tests the guarantees on real processes.
+Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirements-audit.md).
+
+**Who wrote what.** The M1 code (`auction/state.py`'s `apply()` and commands,
+gRPC, auth and sessions, the closer, the LLM server) was written by the author.
+Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`). The M2 code (Raft,
+persistence, replication, the harness and checker, and this chunk's payment and
+LLM wiring) was built with Claude Code, one chunk at a time, under the author's
+review: each chunk was studied, discussed and committed by the author.
 
 ---
 
@@ -38,17 +49,20 @@ flowchart LR
     N2["node n2 (same)"]
     N3["node n3 (same)"]
     L["LLM server :50052<br/>llm_server/ (Ollama)"]
+    G["mock payment gateway<br/>in-process stub, server/payment_gateway.py"]
 
     C1 -- "gRPC + token<br/>redirect to leader" --> A1
     H --> A1
     D -- "GetNodeStatus" --> P1
     P1 <-- "RequestVote / AppendEntries" --> N2
     P1 <-- "RequestVote / AppendEntries" --> N3
-    A1 -- "leader only, before proposing" --> L
+    A1 -- "leader only, deadline 25 s" --> L
+    A1 -- "leader only, before proposing" --> G
 ```
 
-- **Client port** (50071-50073): `AuthService` and `AuctionService` behind a
-  session-token interceptor. A follower answers "not leader, try *there*".
+- **Client port** (50071-50073): `AuthService`, `AuctionService`,
+  `PaymentService` and `AssistantService` behind a session-token interceptor.
+  A follower answers "not leader, try *there*".
 - **Peer port** (50061-50063): `RaftService` (the two Raft RPCs) and
   `StatusService` (read-only status for the dashboard and checker). It has no
   auth (decisions.md A9, T2).
@@ -76,22 +90,28 @@ python -m venv .venv
 `pytest`, `rich` (dashboard) and `ollama` (LLM server). It was developed on
 Python 3.13.13.
 
-**Optional: the LLM.** Install [Ollama](https://ollama.com/download), then:
+**The LLM.** Install [Ollama](https://ollama.com/download), then pull the
+model (about 2.5 GB, runs on the CPU) and start the LLM server, which is its
+own process on port 50052:
 
 ```powershell
 ollama pull qwen3:4b-instruct-2507-q4_K_M
+.venv\Scripts\python.exe -m llm_server.serve                 # the LLM server (model name is in llm_server\config.py)
+.venv\Scripts\python.exe scripts\llm_rpc_smoke.py            # one call per job, to check it works on its own
 ```
 
-Without Ollama the system still runs: description generation fails fast and
-the auction is created with an empty description (decisions.md A10;
+`run_cluster.ps1` and `demo.ps1` start the LLM server for you. The first call
+after Ollama loads the model took 15.75 s on the dev machine; later calls took
+1 to 7 s. Every call the nodes make carries a 25 s deadline.
+
+Without Ollama the system still runs. A description at creation degrades to
+`""`, and the assistant calls return a clear "the assistant is unavailable ...;
+the auction is unaffected" answer (decisions.md C12, C13;
 [docs/design-notes.md](docs/design-notes.md) explains the model choice).
-**Every recorded chaos run and the recorded demo run were made without
-Ollama running.** The LLM server was up, every description call failed fast,
-and the description degraded to `""`. So the "call, then degrade" path is
-exercised, but real generated text never was
-([docs/testing-and-chaos.md](docs/testing-and-chaos.md) Known gaps 6;
-`runs\demo-20261109-220454\logs\llm.log`). The stress writes make no LLM
-call at all.
+**The recorded demo run used the real model** (see "The scripted demo"). **The
+recorded chaos run used a canned-answer LLM server** (`--fake-llm`), not the
+model: a 4B model on the CPU would share cores with Raft's election timers
+(decisions.md C22).
 
 The generated gRPC stubs are committed in `generated\`. After changing a
 `.proto` file, regenerate them:
@@ -160,6 +180,27 @@ It shows, per node, the role, term, leader, commitIndex, lastApplied, last log
 entry and state digest, plus one verdict: `agree`, `catching up` or
 `DIVERGED` ([docs/testing-and-chaos.md](docs/testing-and-chaos.md) §2).
 
+### Using it from Python
+
+`ClusterClient` has the handout's functions: `login`, `logout`,
+`post(token, type, data)`, `get(token, type, params)` and
+`process_business_request(request_id, payload, context)`. `post` and `get` use the
+typed RPCs; `process_business_request` calls the server's
+`BusinessService.ProcessBusinessRequest`, which dispatches to the same handlers:
+
+```python
+c = ClusterClient(["127.0.0.1:50071", "127.0.0.1:50072", "127.0.0.1:50073"])
+c.login("mrudul", "pass")
+c.post(c.token, "bid", {"auction_id": 1, "amount": 150})
+c.post(c.token, "payment", {"auction_id": 1, "action": "pay", "amount": 150})   # the winner, after the close
+c.get(c.token, "escrow", {"auction_id": 1})
+c.get(c.token, "assistant", {"question": "Can I bid one more?", "auction_id": 1})
+c.get(c.token, "price_trends", {})
+```
+`post` types: `auction`, `bid`, `payment` (`action`: `pay`, `release`, `refund`),
+`description`. `get` types: `auction`, `auctions`, `escrow`, `assistant`,
+`price_trends`. The seller releases or refunds; only the winner pays.
+
 ### The scripted demo
 
 ```powershell
@@ -167,11 +208,19 @@ entry and state digest, plus one verdict: `agree`, `catching up` or
 ```
 
 It opens the dashboard and runs `scripts\demo.py`: start the LLM server and 3
-nodes, log in, create an auction, race two equal bids, kill -9 the leader,
-keep bidding, restart the dead node, wait for the close, then run the
-checker. `demo.py` was run (`--pause 0.3`, all eight properties passed). The
-`demo.ps1` wrapper itself was only syntax-checked, never run end to end.
-Minute-by-minute script: [docs/demo-runsheet.md](docs/demo-runsheet.md).
+nodes, warm the model, log in, create an auction (the LLM writes the
+description), race two equal bids, ask the assistant about the live auction,
+kill -9 the leader, keep bidding, restart the dead node, wait for the close,
+show the LLM-written result summary, have the winner pay into escrow, kill -9
+the leader **again** and read the same escrow from the new leader, release it,
+show price trends, then run the checker.
+
+Run end to end on 2026-11-10 with the real model (`demo.ps1 -Pause 0.5`, exit
+0, all ten properties PASS, 90.2 s with 0.5 s pauses). Timings printed by that
+run: model warm-up 6.13 s, create auction including the LLM description 1.83 s,
+assistant answer 1.14 s, close to summary visible 5.56 s, price trends 2.28 s.
+At `-Pause 4` the same run is longer by about 3.5 s per step. Minute-by-minute
+script: [docs/demo-runsheet.md](docs/demo-runsheet.md).
 
 Do not run the demo and `run_cluster.ps1` at the same time: they use the same
 ports.
@@ -181,12 +230,12 @@ ports.
 ## Tests, stress, chaos, checker
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q                                   # the whole suite (~75 s)
+.venv\Scripts\python.exe -m pytest -q                                   # the whole suite (~107 s)
 .venv\Scripts\python.exe -m pytest tests\test_raft_election.py -v       # one file
 .venv\Scripts\python.exe scripts\stress.py all                          # throughput + 3 failover configs
 .venv\Scripts\python.exe scripts\stress.py throughput --clients 1,2,4,8,16 --seconds 15
 .venv\Scripts\python.exe scripts\stress.py failover --kills 20
-.venv\Scripts\python.exe scripts\chaos.py --duration 600                # 10 minutes, prints its seed
+.venv\Scripts\python.exe scripts\chaos.py --duration 600 --fake-llm     # 10 minutes, prints its seed
 .venv\Scripts\python.exe scripts\chaos.py --seed 634526 --duration 600  # same fault schedule again
 .venv\Scripts\python.exe -m checker runs\chaos-634526-20261110-104604   # re-check a saved run
 ```
@@ -196,16 +245,20 @@ ports.
   (for example `test_workload.py`, `test_failover_grpc.py`,
   `test_serve_grpc.py`, `test_harness.py`). Don't run the suite during a chaos
   run (testing-and-chaos.md Known gaps 13).
-- Last full run: 377 passed, 3 xfailed. The 3 are strict xfails: the
+- Last full run: 654 passed, 1 failed, 3 xfailed; the one failure was a stale assertion in `test_assistant_grpc.py` (it looked for the old summary prompt), fixed and re-run on its own: 1 passed. The 3 xfails are strict xfails: the
   persistence tests run against MemoryStorage, to prove those tests can fail
   (decisions.md P13).
+- `pytest.ini` sets `--capture=sys`. With pytest's default capture a gRPC log
+  line was written into a node's `log.bin` through a recycled Windows handle and
+  the restarted node refused to start (decisions.md C21). gRPC's own log lines
+  therefore print to the terminal during the suite.
 - Chaos and stress use ports 50081-50083 (peer), 50091-50093 (client) and
   50059 (LLM). Output goes to `runs\` (gitignored, not in the submission zip).
 - A seed fixes the fault **schedule**, not the run. Thread timing and who
   leads when a fault fires are not replayable (decisions.md T9).
 - `chaos.py` exits 0 only if every property passed.
 
-### The eight checker properties ([checker/properties.py](checker/properties.py))
+### The ten checker properties ([checker/properties.py](checker/properties.py))
 
 | property | one line |
 |---|---|
@@ -217,6 +270,8 @@ ports.
 | `rejections-consistent-with-final-state` | a refused bid is absent, and its stated reason ("highest bid is H", "closed", "time is up") matches the final state |
 | `unknown-outcome-at-most-once` | a bid whose outcome the client never learned is present 0 or 1 times, never twice |
 | `at-most-one-leader-per-term` | Figure 3 Election Safety, over every leader seen in status polls and node logs |
+| `escrow-legal-and-at-most-one-payment` | payer is the winner, amount is the winning bid, settlement belongs to its own payment, at most one acknowledged payment per auction and it is the one in the state, never both a release and a refund |
+| `summary-at-most-one-on-closed-auction` | at most one accepted summary per auction, only on a closed one, never empty |
 
 Each property has a test that breaks exactly it (`tests/test_checker.py`).
 What the checker does **not** prove: [docs/viva-prep.md](docs/viva-prep.md)
@@ -242,6 +297,7 @@ and their numbers are reproduced in the `docs\` files.
 | Chaos run, seed 634526, 600 s | 58 faults; 11 256 writes (8 957 accepted bids, 2 137 rejected, 88 unknown, of which 3 committed once each); 63 auctions, all closed; all three nodes at `digest_index` 11 293; **all 8 properties PASS**, exit 0 | `runs\chaos-final2.out`, `runs\chaos-634526-20261110-104604\`; [docs/testing-and-chaos.md](docs/testing-and-chaos.md) §6 |
 | Bid latency under that chaos run | p50 8.1 ms, p95 145 ms, max 5.65 s (unknowns excluded) | [docs/testing-and-chaos.md](docs/testing-and-chaos.md) §6; recomputed from `history.jsonl` |
 | Earlier chaos run, seed 737075, 600 s | 58 faults; 8 247 writes; all 8 properties PASS (made before the T16 fix, so latencies are inflated) | [docs/testing-and-chaos.md](docs/testing-and-chaos.md) §6 |
+| Chaos run with payments, seed 396704, 600 s, `--fake-llm` | 57 faults; 11 978 writes: 11 719 bids (9 674 accepted, 1 982 rejected, 63 unknown), 69 creates, 12 logins, payments (64 accepted, 36 refused) and settlements (54 releases and 10 refunds accepted, 14 refused); 69 auctions, all closed, all with a summary; escrow RELEASED 54, REFUNDED 10, NONE 5; all three nodes at `digest_index` 12 099; **all 10 properties PASS**, exit 0 | `runs\chaos-396704-20261110-125757\`; [docs/testing-and-chaos.md](docs/testing-and-chaos.md) §6.1 |
 | Aborted chaos run, seed 79402 | no verdict: the harness killed itself at 562 s (PID reuse, decisions.md T19). Not a system failure, and no checker ran | same |
 
 Why the client waits ~2.2 s when Raft needs ~0.9 s: Windows takes 2.0 s to
@@ -325,17 +381,26 @@ there.
   [testing-and-chaos.md](docs/testing-and-chaos.md) gap 12).
 - **A resumed follower deposes a healthy leader.** There is no PreVote and no
   §6 rule (decisions.md T15). This costs liveness, never safety.
-- **Reads were never exercised by the chaos workload.** The workload only
-  writes. Read-index is covered by unit tests (`test_raft_read_index.py`,
-  `test_reads_on_raft.py`) and by the demo's two `GetAuction` calls.
+- **The chaos run's LLM was a canned-answer server.** The FAQ and price-trend
+  reads are covered by unit and gRPC tests and the demo, not by chaos. (The
+  chaos workload does read now: payers read `GetAuction`, sellers `GetEscrow`.)
 - **The peer port is plain TCP with no auth.** Session tokens are stored in
   plain text in `log.bin` ([auction-on-raft.md](docs/auction-on-raft.md) §15).
-- **Not built from the problem statement:** the mock payment/escrow service
-  and an `ExtendAuction` command. The LLM server's FAQ
-  (`AnswerBiddingQuestion`) and result-summary (`SummariseAuctionResult`)
-  RPCs exist and can be called directly (`scripts\llm_rpc_smoke.py`), but the
-  auction server never calls them. The dashboard shows a state digest rather
-  than each node's high bid.
+- **Not built from the problem statement:** an `ExtendAuction` command (the
+  anti-snipe stretch goal). The dashboard shows a state digest rather than each
+  node's high bid.
+- **Payment is a mock, and not atomic with the commit.** A release or refund
+  asked of the gateway cannot be undone; a payout race across a leader change
+  is possible in principle and untested. Only the seller can refund; there is no
+  dispute path ([docs/payment-and-llm.md](docs/payment-and-llm.md) section 4).
+- **The model's text is not tested for truth.** The result-summary and
+  price-trend prompts are given computed facts, and the summary prompt gets no
+  times and no bid list (decisions.md C18, C23). One live summary after that
+  change still wrote the closing bid as 40 instead of 400. Price-trend numbers
+  are returned alongside the model's wording for that reason.
+- **`ProcessBusinessRequest` takes an untyped JSON payload,** validated field by
+  field on the server. It dispatches to the typed handlers behind the same auth
+  and leader rules; the typed RPCs are the primary API (decisions.md C19).
 
 ---
 
@@ -347,10 +412,11 @@ there.
 | [docs/raft-replication.md](docs/raft-replication.md) | log replication, repair, Figure 8, the no-op |
 | [docs/raft-persistence.md](docs/raft-persistence.md) | FileStorage, durable-before-reply, torn tails |
 | [docs/auction-on-raft.md](docs/auction-on-raft.md) | the auction on the log, sessions, dedupe, read-index, the client |
+| [docs/payment-and-llm.md](docs/payment-and-llm.md) | escrow, the LLM in the app, the new checker properties, known gaps |
+| [docs/requirements-audit.md](docs/requirements-audit.md) | every assignment requirement: status, code, evidence |
 | [docs/testing-and-chaos.md](docs/testing-and-chaos.md) | status RPC, dashboard, chaos harness, checker, results |
 | [docs/stress-results.md](docs/stress-results.md) | throughput, latency, failover vs. the paper's Figure 16 |
 | [docs/decisions.md](docs/decisions.md) | every non-obvious choice, with the viva question |
-| [docs/viva-prep.md](docs/viva-prep.md) | likely questions, short answers, reading order |
 | [docs/design-notes.md](docs/design-notes.md) | M1 notes: the close loop, the LLM model choice |
 
 ---
@@ -363,8 +429,9 @@ there.
 ```
 
 It prints the zip path and every file in it. It contains the code, `generated\`,
-`proto\`, `scripts\`, `tests\`, `docs\`, README, LICENSE, `requirements.txt` and
-`pytest.ini`. It leaves out `.venv`, `data\`, `__pycache__`, `.git`,
-`papers\`, CLAUDE.md, CLAUDE.old.md, `runs\`, `logs\`, `dist\`, and the
-personal note folders `MyNotes\`, `Learning\` and `Documents\`. Tested by
-`tests\test_make_submission.py`.
+`proto\`, `scripts\`, `tests\`, `docs\`, README, LICENSE, `requirements.txt`,
+`pytest.ini` and `Documents\Problem_Statement.md`. It leaves out `.venv`,
+`data\`, `__pycache__`, `.git`, `papers\`, CLAUDE.md, CLAUDE.old.md, `runs\`,
+`logs\`, `dist\`, the personal note folders `MyNotes\`, `Learning\` and the rest
+of `Documents\`, and two personal notes in `docs\`: `viva-prep.md` and
+`reflection-facts.md`. Tested by `tests\test_make_submission.py`.
