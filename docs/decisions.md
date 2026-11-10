@@ -2637,6 +2637,10 @@ more commands in the same additive way as step 1.
                 built; written down as a gap (payment-and-llm.md section 4).
 - Cost:         the item name and bidder names are still in the system turn (the
                 known soft spot of this job), now inside the FACTS block.
+- Follow-up:    numbers in the summary are checked against the facts in code, with a
+                template fallback (`summary_numbers_ok`, `template_summary` in
+                server/summarizer.py). Known limit: it cannot catch the model
+                swapping two valid numbers (e.g. opening and closing).
 - Viva Q:       "How do you stop the model inventing things in the summary?"
 - Answer:       I take away what it could invent from. It gets no times and no
                 bid list, only computed facts. That stopped the listing and the

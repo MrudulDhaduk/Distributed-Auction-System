@@ -37,6 +37,7 @@ what makes them idempotent.
 """
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -52,6 +53,56 @@ DEFAULT_RETRY_AFTER_SECONDS = 10.0
 STOP_JOIN_SECONDS = 5.0
 
 log = logging.getLogger("server.summarizer")
+
+# A number: digits, optionally with comma separators ("1,200") and a decimal part.
+_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _numbers(text: str) -> set:
+    """Every number in `text`, commas stripped, so "1,200" and "1200" are the same."""
+    return {m.replace(",", "") for m in _NUMBER.findall(text)}
+
+
+def summary_numbers_ok(summary: str, facts: dict) -> bool:
+    """True only if every number in the model's summary also appears in the
+    string form of some value in `facts`. A dropped digit ("40" for 400) fails.
+    Known limit: it cannot catch the model swapping two numbers that are both
+    in the facts (e.g. opening and closing bid)."""
+    allowed = set()
+    for value in facts.values():
+        allowed |= _numbers(str(value))
+    return _numbers(summary) <= allowed
+
+
+def template_summary(facts: dict) -> str:
+    """A plain summary built only from the facts, no model involved."""
+    if not facts["bids"]:
+        return f"{facts['item']}: no bids were placed."
+    return (
+        f"{facts['item']}: bids placed {facts['bids']}, from {facts['distinct_bidders']} bidders. "
+        f"Opening bid {facts['opening_bid']}, closing bid {facts['closing_bid']}. "
+        f"Winner {facts['winner']}, with a winning bid of {facts['winning_bid']}."
+    )
+
+
+def _facts(context: dict) -> dict:
+    """The same figures the LLM server puts in its FACTS block
+    (llm_servicer._summary_facts), worked out here from the snapshot, so the
+    check compares the model's text to the state and not to its own prompt."""
+    bids = context["bid_history"]
+    facts = {
+        "item": context["auction"]["item"],
+        "bids": len(bids),
+        "distinct_bidders": len({b["bidder"] for b in bids}),
+        "opening_bid": None, "closing_bid": None, "winner": None, "winning_bid": None,
+    }
+    if bids:
+        top = max(bids, key=lambda b: b["amount"])
+        facts.update(
+            opening_bid=bids[0]["amount"], closing_bid=bids[-1]["amount"],
+            winner=top["bidder"], winning_bid=top["amount"],
+        )
+    return facts
 
 
 class SummaryWorker:
@@ -122,6 +173,11 @@ class SummaryWorker:
                 auction_id, request_id, self._retry_after, llm_context.failure_reason(e),
             )
             return False
+
+        facts = _facts(context)
+        if not summary_numbers_ok(text, facts):
+            log.warning("summarizer: auction %s summary has a number not in the facts; using the template", auction_id)
+            text = template_summary(facts)
 
         try:
             applied = self._replicator.submit(RecordSummary(auction_id=auction_id, summary=text))

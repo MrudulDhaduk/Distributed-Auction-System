@@ -397,7 +397,9 @@ there.
   price-trend prompts are given computed facts, and the summary prompt gets no
   times and no bid list (decisions.md C18, C23). One live summary after that
   change still wrote the closing bid as 40 instead of 400. Price-trend numbers
-  are returned alongside the model's wording for that reason.
+  are returned alongside the model's wording for that reason. Numbers in the
+  summary are checked against the facts in code, with a template fallback; it
+  cannot catch the model swapping two valid numbers (e.g. opening and closing).
 - **`ProcessBusinessRequest` takes an untyped JSON payload,** validated field by
   field on the server. It dispatches to the typed handlers behind the same auth
   and leader rules; the typed RPCs are the primary API (decisions.md C19).

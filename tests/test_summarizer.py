@@ -34,7 +34,7 @@ from generated import auction_pb2
 from raft.messages import EntryKind
 from replication import codec
 from replication.state_machine import Applied
-from server.summarizer import SummaryWorker
+from server.summarizer import SummaryWorker, summary_numbers_ok, template_summary
 from tests.auction_cluster import AuctionCluster, FakeRpcError, call, wait_until
 from tests.test_assistant_on_raft import CLOSE, NOW, setup
 
@@ -257,6 +257,34 @@ def test_one_failing_auction_does_not_block_the_next(cluster):
     leader.llm.on_call = None
     leader.llm.error = None
     assert leader.summarizer.tick(now=1000.0) == [1]    # and auction 1 is retried after its pause
+
+
+# --- the numbers in the text are checked against the facts, in code -------------------------------------
+
+FACTS = {"item": "vintage clock", "bids": 7, "distinct_bidders": 3, "opening_bid": 100,
+         "closing_bid": 400, "winner": "mrudul", "winning_bid": 400}
+
+
+def test_a_dropped_digit_is_rejected():
+    assert not summary_numbers_ok("The closing bid was 40.", FACTS)
+
+
+def test_a_summary_with_only_numbers_from_the_facts_is_accepted():
+    assert summary_numbers_ok("7 bids from 3 bidders. Opened at 100, closed at 400. mrudul won with 400.", FACTS)
+    assert summary_numbers_ok("The closing bid was 1,200.", {**FACTS, "closing_bid": 1200})  # commas do not matter
+
+
+def test_the_worker_falls_back_to_the_template_when_the_models_number_is_wrong(cluster):
+    leader, t = setup(cluster, close=True)          # bids: karan 100, mrudul 150
+    leader.llm.answer = "mrudul won. The closing bid was 15."
+
+    assert leader.summarizer.tick() == [1]
+
+    expected = template_summary({"item": "vintage clock", "bids": 2, "distinct_bidders": 2,
+                                 "opening_bid": 100, "closing_bid": 150, "winner": "mrudul", "winning_bid": 150})
+    cluster.wait_converged()
+    assert set(map(tuple, summaries(cluster).values())) == {(expected,)}
+    assert [c.summary for c in record_summary_commands(leader)] == [expected]
 
 
 # --- the real poll thread ---------------------------------------------------------------------------
