@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package assistant;
+
+// Chunk 7, step 2: the LLM, wired into the application server (R4, R5, R6).
+//
+// The LLM server (llm.proto) stays stateless and unreachable from clients.
+// These RPCs are the client-facing side: the LEADER reads the replicated
+// auction state first, sends it to the LLM server as context
+// (getLLMAnswer(requestId, query, context)), and answers.
+//
+//   AskAssistant         the bidding FAQ chatbot, optionally about one auction
+//   GenerateDescription  a (new) listing text for an auction, on request
+//   GetPriceTrends       a summary of the closed auctions' prices
+//
+// (The result summary of a single closed auction has no RPC: the leader's
+// summary worker writes it into the log after the close; clients read it as
+// Auction.summary.)
+//
+// Conventions, as in auction.proto and payment.proto:
+//   * the session token travels in metadata; the caller is the token's user;
+//   * FAILED_PRECONDITION = not the leader (trailing metadata names it),
+//     UNAVAILABLE = could not confirm / outcome unknown;
+//   * all three are LEADER ONLY and read the state after a read barrier.
+//
+// THE LLM BEING DOWN OR SLOW IS NOT A gRPC ERROR HERE. It is a clear answer
+// in Result (success=false, reason names the cause and says the auction is
+// unaffected). A gRPC UNAVAILABLE would make ClusterClient retry the same
+// call on every node for up to 30 s, against a model that is not coming back.
+// The app server puts a deadline on every LLM call
+// (llm_server/config.py: APP_DEADLINE_SECONDS) so "slow" ends the same way.
+//
+// None of the three writes the model's call into the log. GenerateDescription
+// writes the generated TEXT (a SetDescription command carries it as plain
+// data); the other two write nothing.
+//
+// Result is declared here rather than imported, as in payment.proto.
+
+service AssistantService {
+  rpc AskAssistant(AskRequest) returns (AnswerResponse);
+
+  // Seller only, open auctions only. Replicated as SetDescription.
+  rpc GenerateDescription(GenerateDescriptionRequest) returns (DescriptionResponse);
+
+  rpc GetPriceTrends(PriceTrendsRequest) returns (PriceTrendsResponse);
+}
+
+message Result {
+  bool success = 1;
+  string reason = 2;
+}
+
+message AskRequest {
+  // The bidder's question, verbatim. Untrusted; the LLM server puts it in a
+  // user turn.
+  string question = 1;
+  // Optional: set = "about this auction" (its live state is sent as context);
+  // unset = a general question.
+  optional int64 auction_id = 2;
+}
+
+message AnswerResponse {
+  Result result = 1;
+  // The id minted by the application server for this LLM call. It appears in
+  // BOTH servers' logs, which is what it is for (llm.proto, "Correlation").
+  string request_id = 2;
+  string answer = 3;      // "" unless result.success
+}
+
+message GenerateDescriptionRequest {
+  int64 auction_id = 1;
+  // What the seller says about the item. At least one is required: with
+  // nothing to work from the model would invent the item's properties.
+  map<string, string> attributes = 2;
+  string client_id = 3;
+  uint64 seq = 4;
+}
+
+message DescriptionResponse {
+  Result result = 1;
+  string request_id = 2;
+  string description = 3;   // the text now on the auction; "" unless result.success
+}
+
+message PriceTrendsRequest {
+  // How many of the most recent closed auctions to include. 0 = the default (20).
+  int32 limit = 1;
+}
+
+// One closed auction, as the trend sees it. Computed in code from the
+// replicated state, not by the model.
+message TrendPoint {
+  int64 auction_id = 1;
+  string item = 2;
+  int64 opening_bid = 3;    // 0 if nobody bid
+  int64 winning_bid = 4;    // 0 if nobody bid
+  int64 bid_count = 5;
+}
+
+// Plain arithmetic over the points, in code. Integers: the mean is floored.
+message TrendStats {
+  int64 auctions = 1;
+  int64 with_bids = 2;
+  int64 no_bids = 3;
+  int64 lowest_winning_bid = 4;     // among auctions with bids; 0 if none
+  int64 highest_winning_bid = 5;
+  int64 mean_winning_bid = 6;
+  int64 total_bids = 7;
+}
+
+message PriceTrendsResponse {
+  // result.success describes the SUMMARY: false when the model could not be
+  // reached. `stats` and `points` are computed in code and are filled either way.
+  Result result = 1;
+  string request_id = 2;    // "" if the model was not asked
+  string summary = 3;
+  TrendStats stats = 4;
+  repeated TrendPoint points = 5;
+}
