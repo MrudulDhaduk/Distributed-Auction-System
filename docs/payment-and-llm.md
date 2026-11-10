@@ -244,8 +244,12 @@ What this chunk does not handle, and what would go wrong today.
    but a live call can still word things wrongly. The result-summary prompt now
    gets only computed facts and no times (C23). In the one live call run after
    that change it listed no bids and gave no times, but wrote the closing bid as
-   "40" when the facts said 400. A check in code that every number in a summary
-   appears in the facts would catch that; it is not built.
+   "40" when the facts said 400. That slip is why the summary worker now checks
+   the text in code (C23): the facts are computed from the state snapshot, a
+   summary with a number not among them is rejected, and a template built only
+   from the facts replaces it. Known limits: it cannot catch the model swapping
+   two valid numbers (e.g. opening and closing bid), and it does not check
+   numbers written as words (e.g. "forty").
 5. **Model latency.** The first call after Ollama loads the weights took
    15.75 s; later ones 1 to 7 s on this machine. The 25 s deadline fits one
    cold start. A model slower than that degrades like an outage.

@@ -216,6 +216,13 @@ T11; [testing-and-chaos.md](testing-and-chaos.md) §4 and Known gaps 2, 4, 5.
 - *"Is LLM output in the log?"* Only its text, as an ordinary string, in
   `SetDescription` / `RecordSummary` / `CreateAuction.description`. Replay never
   calls the model (llm.proto, "call first, replicate second").
+- *"What if the model gets a number wrong in a summary?"* It did, once: a live
+  call wrote "40" for a closing bid of 400. So the worker checks the numbers in
+  code before it proposes `RecordSummary`: it computes the facts from the state
+  snapshot, and a summary with a number that is not among them is rejected and
+  replaced by a template built only from the facts (C23). Two limits I say out
+  loud: it cannot catch the model swapping two valid numbers (opening and
+  closing bid), and it does not check numbers written as words ("forty").
 - *"Where are `post`, `get` and `processBusinessRequest`?"* `ClusterClient.post`
   and `.get` in `client/auction_client.py` are the handout's signatures over typed
   RPCs (C9). `processBusinessRequest` is a real server RPC,
@@ -252,8 +259,10 @@ T11; [testing-and-chaos.md](testing-and-chaos.md) §4 and Known gaps 2, 4, 5.
    bid. §6.3's "re-executed" is only true of the schedule (T9). Payment and the
    LLM wiring ARE built now (chunk 7); their known gaps are in
    [payment-and-llm.md](payment-and-llm.md) section 4: a gateway payout cannot be
-   undone and is not atomic with the commit, the model's text is not tested for
-   truth, and the model can still get a number wrong (one live summary wrote 40 for 400, C23).
+   undone and is not atomic with the commit, and the model's text is not tested
+   for truth beyond its numbers (checked in code against the facts, with a
+   template fallback, C23; it misses two valid numbers swapped and numbers
+   written as words).
 9. **The stale-handle explanation (C21).** The fix is measured (0 failures in
    24 runs vs 11 of 14), the mechanism is inferred.
 10. **One test failure never explained.** `test_the_cluster_client_pays_and_reads_the_escrow_across_a_leader_kill`

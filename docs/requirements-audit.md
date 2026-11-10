@@ -95,8 +95,11 @@ this file is the state BEFORE the chunk; this is after.
 **Not DONE, and why:** only R14 is partial, because a video and a reflection
 cannot be produced by the code. Everything else is DONE, with the limits in
 [payment-and-llm.md](payment-and-llm.md) section 4 (the mock gateway, the
-model's text not tested for truth: the summary prompt now gets computed facts
-and no times, but one live call still wrote 40 for 400, C23; the chaos run's LLM
-was a canned stand-in).
+model's text not tested for truth beyond its numbers: the summary prompt gets
+computed facts and no times, one live call still wrote 40 for 400, and so the
+worker now checks the summary's numbers in code against facts computed from the
+state and replaces a failing text with a template, C23; it cannot catch two valid
+numbers swapped or numbers written as words; the chaos run's LLM was a canned
+stand-in).
 
 Suite at the end of the chunk: last full run 654 passed, 1 failed, 3 xfailed; the failure was a stale assertion in `test_assistant_grpc.py`, fixed and re-run on its own (passed).
