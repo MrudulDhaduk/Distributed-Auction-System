@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package payment;
+
+// Chunk 7, step 1: payment and escrow (R3).
+//
+// After an auction closes, its winner pays the winning bid into ESCROW. The
+// seller then either RELEASES it (the seller confirms; the money is the
+// seller's) or REFUNDS it (the seller cancels; the money goes back to the
+// winner). NONE -> HELD -> RELEASED | REFUNDED; the last two are final.
+//
+// Same conventions as auction.proto, restated because they are the ones a
+// reader will ask about:
+//
+//   * The session token travels in gRPC metadata; the caller's identity is
+//     the validated token (payer for Pay, seller for Release/Refund). No
+//     request below has a user field.
+//   * A refused payment is a business answer, not a transport error: it rides
+//     in Result. gRPC status codes are for "could not process at all":
+//     FAILED_PRECONDITION = not the leader (trailing metadata names the
+//     leader), UNAVAILABLE = outcome unknown (retry with the SAME client_id
+//     and seq).
+//   * Every write carries (client_id, seq), the section 8 serial numbers.
+//     A retried Pay is answered from the replicated dedupe table; the
+//     gateway is not called again.
+//   * Reads (GetEscrow) are leader-only, after a read barrier, like
+//     GetAuction.
+//
+// The money moves in a mock gateway (server/payment_gateway.py) called by
+// the LEADER's handler before it proposes; the gateway's reference travels
+// on the replicated command as plain data. apply() never calls it.
+//
+// Result is declared here rather than imported from auction.proto: protoc
+// emits a bare `import auction_pb2` for a cross-file import, which
+// scripts/gen_proto.py only repairs in the *_grpc files (llm.proto stands
+// alone for the same reason).
+
+service PaymentService {
+  // The winner pays the winning bid into escrow.
+  rpc Pay(PayRequest) returns (PaymentResponse);
+
+  // The seller confirms: HELD -> RELEASED.
+  rpc ReleaseEscrow(EscrowActionRequest) returns (PaymentResponse);
+
+  // The seller cancels the sale: HELD -> REFUNDED.
+  rpc RefundEscrow(EscrowActionRequest) returns (PaymentResponse);
+
+  rpc GetEscrow(GetEscrowRequest) returns (GetEscrowResponse);
+}
+
+message Result {
+  bool success = 1;
+  string reason = 2;
+}
+
+message PayRequest {
+  int64 auction_id = 1;
+  // What the winner intends to pay. Must equal the winning bid; apply()
+  // refuses anything else.
+  int64 amount = 2;
+  string client_id = 3;
+  uint64 seq = 4;
+}
+
+message EscrowActionRequest {
+  int64 auction_id = 1;
+  string client_id = 2;
+  uint64 seq = 3;
+}
+
+message PaymentResponse {
+  Result result = 1;
+  // The gateway reference now stored on the escrow record: the payment's
+  // for Pay, the settlement's for Release/Refund. "" when refused.
+  string reference = 2;
+}
+
+message GetEscrowRequest {
+  int64 auction_id = 1;
+}
+
+message Escrow {
+  int64 auction_id = 1;
+  string status = 2;          // NONE | HELD | RELEASED | REFUNDED
+  int64 amount = 3;           // 0 while NONE
+  string payer = 4;           // the winner who paid; "" while NONE
+  string seller = 5;          // the auction's owner
+  string winner = 6;          // "" if the auction is open or had no bids
+  string payment_ref = 7;
+  string settlement_ref = 8;
+}
+
+message GetEscrowResponse {
+  // "no such auction" is a business answer, as in GetAuctionResponse.
+  Result result = 1;
+  Escrow escrow = 2;
+}
