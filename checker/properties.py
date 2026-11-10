@@ -7,13 +7,16 @@ one does not (docs/testing-and-chaos.md, part 4).
 Inputs (plain data; the chaos harness writes them as JSON):
 
   history  list of dicts, one per client operation:
-             client, client_id, user, seq, op ("login" | "create" | "bid"),
+             client, client_id, user, seq, op ("login" | "create" | "bid" |
+             "pay" | "release" | "refund"),
              outcome ("ok" | "rejected" | "unknown"), reason,
              start, end            wall clock, epoch micros, taken by the client
              auction_id, amount    (bid, create)
              high_bid, high_bidder (bid: what the server replied)
              item, close_time      (create)
              token_hash            (login ok: digest.hash_token(token))
+             reference             (pay/release/refund ok: the gateway reference
+                                    the reply carried)
   dumps    {node_id: {"node_id", "digest_index", "state_digest", "state_json"}}
            -- StatusService.DumpState from every node, taken after the
            cluster went quiet. A node that could not be dumped is
@@ -46,13 +49,19 @@ NO_BID_AFTER_CLOSE = "no-bid-accepted-after-close"
 REJECTIONS = "rejections-consistent-with-final-state"
 UNKNOWN_AT_MOST_ONCE = "unknown-outcome-at-most-once"
 ONE_LEADER_PER_TERM = "at-most-one-leader-per-term"
+ESCROW = "escrow-legal-and-at-most-one-payment"
+SUMMARIES = "summary-at-most-one-on-closed-auction"
 
 PROPERTY_NAMES = (
     WELL_FORMED, ACKED_PRESENT, IDENTICAL, INCREASING,
     NO_BID_AFTER_CLOSE, REJECTIONS, UNKNOWN_AT_MOST_ONCE, ONE_LEADER_PER_TERM,
+    ESCROW, SUMMARIES,
 )
 
-WRITES = ("login", "create", "bid")
+PAYMENT_OPS = ("pay", "release", "refund")
+WRITES = ("login", "create", "bid") + PAYMENT_OPS
+
+ESCROW_STATUSES = ("NONE", "HELD", "RELEASED", "REFUNDED")
 
 # The reasons AuctionState.apply() and StateMachine.apply_fn() can give for
 # a rejected bid. Anything else is reported: a checker that waves through a
@@ -63,6 +72,17 @@ _TIME_UP = re.compile(r"^Time is up ")
 _NO_AUCTION = re.compile(r"^Auction ID does not exist")
 _STALE = re.compile(r"^stale request")
 _DUP_ID = re.compile(r"^ID already exists")
+
+# The reasons apply() gives for a refused payment or settlement
+# (auction/state.py payment_rejection / settlement_rejection). Anything else
+# is reported.
+_PAY_NOT_WINNER = re.compile(r" is not the winner: only the winner can pay$")
+_PAY_AMOUNT = re.compile(r"^The amount must equal the winning bid of (\d+), not (\d+)$")
+_PAY_ALREADY = re.compile(r"^Escrow is already (\w+), no second payment$")
+_PAY_TIMING = re.compile(r"^(Auction ID does not exist|Auction is not closed yet|Auction closed with no winner)")
+_SETTLE_NOT_SELLER = re.compile(r" is not the seller: only the seller can settle the escrow$")
+_SETTLE_STATE = re.compile(r"^Escrow is (\w+), only HELD money can be settled$")
+_DECLINED = re.compile(r"^declined")
 
 
 @dataclass
@@ -369,6 +389,158 @@ def check_one_leader_per_term(leaders) -> PropertyResult:
     return _result(ONE_LEADER_PER_TERM, len(leaders), violations)
 
 
+def _escrow_state_violations(node, doc) -> tuple:
+    """(violations, checked) for the escrow record of every auction in one
+    node's state: only legal combinations of status and fields."""
+    violations, checked = [], 0
+    for a in doc["auctions"]:
+        e = a.get("escrow")
+        if e is None:
+            continue
+        checked += 1
+        aid, status = a["auction_id"], e["status"]
+        where = f"{node}: auction {aid}"
+        if status not in ESCROW_STATUSES:
+            violations.append(f"{where} has unknown escrow status {status!r}")
+            continue
+        if status == "NONE":
+            if e["amount"] or e["payer"] or e["payment_ref"] or e["settlement_ref"]:
+                violations.append(f"{where} escrow is NONE but has fields set: {e}")
+            continue
+        if not a["closed"]:
+            violations.append(f"{where} has escrow {status} but the auction is not closed")
+        winner = a["winner"]
+        if winner is None:
+            violations.append(f"{where} has escrow {status} but no winner")
+        else:
+            if e["payer"] != winner["bidder"]:
+                violations.append(f"{where} escrow payer {e['payer']!r} is not the winner {winner['bidder']!r}")
+            if e["amount"] != winner["amount"]:
+                violations.append(f"{where} escrow amount {e['amount']} is not the winning bid {winner['amount']}")
+        if not e["payment_ref"]:
+            violations.append(f"{where} escrow is {status} with no payment reference")
+        if status == "HELD":
+            if e["settlement_ref"]:
+                violations.append(f"{where} escrow status HELD but settlement_ref {e['settlement_ref']!r} is set")
+        else:
+            prefix = "REL-" if status == "RELEASED" else "RFD-"
+            expected = prefix + e["payment_ref"][len("PAY-"):]
+            if e["settlement_ref"] != expected:
+                violations.append(
+                    f"{where} escrow status {status} but settlement_ref {e['settlement_ref']!r} is not {expected!r}")
+    return violations, checked
+
+
+def check_escrow(history, states) -> PropertyResult:
+    """Escrow is NONE -> HELD -> RELEASED | REFUNDED, one payment, final.
+
+    From every node's state: each escrow record is a LEGAL combination (the
+    payer is the winner, the amount is the winning bid, a settled escrow's
+    settlement reference belongs to its own payment and to the right kind of
+    settlement, nothing is in escrow on an open auction).
+
+    From the clients' history, against the final state: at most ONE payment
+    was acknowledged per auction and it is the one in the state (same
+    reference, same payer); an acknowledged release/refund is what the state
+    shows, and a release and a refund were never both acknowledged (that
+    would be an illegal transition HELD -> RELEASED -> REFUNDED, or the
+    reverse); and every refusal's stated reason agrees with the final state.
+    """
+    violations, checked = [], 0
+    for node, doc in states.items():
+        v, n = _escrow_state_violations(node, doc)
+        violations += v
+        checked += n
+
+    ref = _reference(states)
+    if ref is None:
+        return _result(ESCROW, checked, violations)
+    auctions = _auctions(ref)
+
+    acked = defaultdict(lambda: defaultdict(list))   # auction -> op -> [records]
+    for r in history:
+        if r["op"] in PAYMENT_OPS and r["outcome"] == "ok":
+            acked[r["auction_id"]][r["op"]].append(r)
+    for aid, ops in sorted(acked.items()):
+        a = auctions.get(aid)
+        e = a["escrow"] if a else None
+        for op, recs in sorted(ops.items()):
+            if len(recs) > 1:
+                plural = {"pay": "payments", "release": "releases", "refund": "refunds"}[op]
+                violations.append(f"auction {aid}: {len(recs)} {plural} were acknowledged (at most 1 allowed)")
+        if "release" in ops and "refund" in ops:
+            violations.append(f"auction {aid}: a release and a refund were both acknowledged")
+        for r in ops.get("pay", []):
+            checked += 1
+            who = f"client {r['client']} seq {r['seq']}"
+            if e is None or e["status"] == "NONE":
+                violations.append(f"{who}: acknowledged payment {r.get('reference')!r} for auction {aid} "
+                                  f"is not in the state (escrow {e and e['status']})")
+            else:
+                if e["payment_ref"] != r.get("reference"):
+                    violations.append(f"{who}: payment acknowledged with reference {r.get('reference')!r} "
+                                      f"but the state holds {e['payment_ref']!r}")
+                if e["payer"] != r["user"]:
+                    violations.append(f"{who}: payment acknowledged to {r['user']!r} but the state's payer is {e['payer']!r}")
+        for op, status in (("release", "RELEASED"), ("refund", "REFUNDED")):
+            for r in ops.get(op, []):
+                checked += 1
+                who = f"client {r['client']} seq {r['seq']}"
+                if e is None or e["status"] != status or e["settlement_ref"] != r.get("reference"):
+                    violations.append(f"{who}: acknowledged {op} of auction {aid} ({r.get('reference')!r}) "
+                                      f"but the state shows {e and (e['status'], e['settlement_ref'])}")
+
+    for r in history:
+        if r["op"] not in PAYMENT_OPS or r["outcome"] != "rejected":
+            continue
+        checked += 1
+        reason, who = r["reason"], f"client {r['client']} seq {r['seq']}"
+        a = auctions.get(r["auction_id"])
+        e = a["escrow"] if a else None
+        if _STALE.match(reason):
+            violations.append(f"{who}: rejected as {reason!r}: the one-write-per-client rule was broken")
+        elif _DECLINED.match(reason):
+            pass  # the gateway's decision, not the state machine's
+        elif r["op"] == "pay":
+            if _PAY_NOT_WINNER.search(reason):
+                if a and a["winner"] and a["winner"]["bidder"] == r["user"]:
+                    violations.append(f"{who}: payment refused as 'not the winner' but {r['user']} is the winner")
+            elif m := _PAY_AMOUNT.match(reason):
+                if a and a["winner"] and a["winner"]["amount"] != int(m.group(1)):
+                    violations.append(f"{who}: refused for the winning bid {m.group(1)}, but it is {a['winner']['amount']}")
+            elif m := _PAY_ALREADY.match(reason):
+                if e is None or e["status"] == "NONE":
+                    violations.append(f"{who}: payment refused as 'already {m.group(1)}' but the final escrow is NONE")
+            elif not _PAY_TIMING.match(reason):
+                violations.append(f"{who}: payment refused with unexpected reason {reason!r}")
+        else:
+            if _SETTLE_NOT_SELLER.search(reason):
+                if a and a["owner"] == r["user"]:
+                    violations.append(f"{who}: {r['op']} refused as 'not the seller' but {r['user']} is the seller")
+            elif not (_SETTLE_STATE.match(reason) or _PAY_TIMING.match(reason)):
+                violations.append(f"{who}: {r['op']} refused with unexpected reason {reason!r}")
+    return _result(ESCROW, checked, violations)
+
+
+def check_summaries(states) -> PropertyResult:
+    """A result summary is recorded at most once per auction, and only on a
+    closed one (auction/state.py summary_rejection). The state keeps the
+    ACCEPTED summaries as a list, so a violating apply() shows up here as a
+    list of two instead of silently overwriting one string."""
+    violations, checked = [], 0
+    for node, doc in states.items():
+        for a in doc["auctions"]:
+            checked += 1
+            summaries = a.get("summaries", [])
+            if len(summaries) > 1:
+                violations.append(f"{node}: auction {a['auction_id']} has {len(summaries)} summaries (at most 1 allowed)")
+            if summaries and not a["closed"]:
+                violations.append(f"{node}: auction {a['auction_id']} has a summary but is not closed")
+            if any(not t.strip() for t in summaries):
+                violations.append(f"{node}: auction {a['auction_id']} has an empty summary")
+    return _result(SUMMARIES, checked, violations)
+
+
 def check_all(history, dumps, leaders) -> list:
     states = _states(dumps)
     return [
@@ -380,6 +552,8 @@ def check_all(history, dumps, leaders) -> list:
         check_rejections(history, states),
         check_unknown_at_most_once(history, states),
         check_one_leader_per_term(leaders),
+        check_escrow(history, states),
+        check_summaries(states),
     ]
 
 

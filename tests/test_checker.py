@@ -18,7 +18,14 @@ import json
 
 import pytest
 
-from auction.state import CloseAuction, CreateAuction, PlaceBid
+from auction.state import (
+    CloseAuction,
+    CreateAuction,
+    PayAuction,
+    PlaceBid,
+    RecordSummary,
+    ReleaseEscrow,
+)
 from checker import properties as P
 from checker.properties import check_all
 from common import time_conv
@@ -60,6 +67,12 @@ def scenario():
         ("cid-karan", 3, PlaceBid(1, "karan", 200, T0 + datetime.timedelta(seconds=3))),  # unknown, committed
         ("", 0, CloseAuction(1, T0 + datetime.timedelta(seconds=31))),
         ("cid-mrudul", 4, PlaceBid(1, "mrudul", 300, T0 + datetime.timedelta(seconds=32))),  # after close
+        # Chunk 7. karan's unknown-outcome 200 DID commit, so karan won at 200.
+        ("cid-mrudul", 5, PayAuction(1, "mrudul", 200, "")),                       # not the winner: refused
+        ("cid-karan", 4, PayAuction(1, "karan", 200, "PAY-KARAN1")),               # the winner pays: HELD
+        ("cid-karan", 5, PayAuction(1, "karan", 200, "")),                         # a second payment: refused
+        ("cid-seller", 3, ReleaseEscrow(1, "seller", "REL-KARAN1")),               # the seller releases: RELEASED
+        ("", 0, RecordSummary(1, "karan won at 200 after 3 bids.")),               # the cluster records the summary
     ]
     history = [
         rec("seller", 1, "login", "ok", 0, token_hash=digest.hash_token("tok-s")),
@@ -75,6 +88,12 @@ def scenario():
         rec("mrudul", 3, "bid", "unknown", 4, 10, auction_id=1, amount=250, reason="ClusterUnavailable"),  # never committed
         rec("mrudul", 4, "bid", "rejected", 32, auction_id=1, amount=300,
             reason="Auction is already closed mrudul"),
+        rec("mrudul", 5, "pay", "rejected", 40, auction_id=1, amount=200,
+            reason="mrudul is not the winner: only the winner can pay"),
+        rec("karan", 4, "pay", "ok", 41, auction_id=1, amount=200, reference="PAY-KARAN1"),
+        rec("karan", 5, "pay", "rejected", 42, auction_id=1, amount=200,
+            reason="Escrow is already HELD, no second payment"),
+        rec("seller", 3, "release", "ok", 43, auction_id=1, reference="REL-KARAN1"),
     ]
     dumps = dumps_from(applied)
     leaders = [{"term": 1, "node": "n1", "source": "status"}, {"term": 2, "node": "n2", "source": "log:n2"},
@@ -328,3 +347,187 @@ def test_a_node_that_gave_no_dump_is_a_failure_not_ignored():
     assert P.IDENTICAL in failed(report)
     assert "n3: no dump" in evidence(report, P.IDENTICAL)
     assert P.ACKED_PRESENT not in failed(report)  # the other two are still checked
+
+
+# --- chunk 7: escrow and summaries -----------------------------------------------------------
+#
+# The good case now carries a payment (karan, the winner at 200), a release by
+# the seller, two refused payments, and a recorded summary. Each case below
+# breaks ONE thing and must make exactly the property that guards it fail.
+
+
+def escrow(doc):
+    return doc["auctions"][0]["escrow"]
+
+
+def test_the_good_case_really_exercises_escrow_and_summaries():
+    report = check_all(*scenario())
+    by_name = {r.name: r for r in report}
+    assert by_name[P.ESCROW].checked >= 4 and by_name[P.SUMMARIES].checked >= 1
+
+
+def test_two_acknowledged_payments_for_one_auction():
+    history, dumps, leaders = scenario()
+    history.append(rec("mrudul", 6, "pay", "ok", 44, auction_id=1, amount=200, reference="PAY-OTHER"))
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report)
+    assert "2 payments" in evidence(report, P.ESCROW) and "auction 1" in evidence(report, P.ESCROW)
+
+
+def test_an_escrow_whose_payer_is_not_the_winner():
+    history, dumps, leaders = scenario()
+    dumps = {n: edit_dump(dumps, n, lambda d: escrow(d).update(payer="mrudul"))[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "payer" in evidence(report, P.ESCROW)
+
+
+def test_an_escrow_amount_that_is_not_the_winning_bid():
+    history, dumps, leaders = scenario()
+    dumps = {n: edit_dump(dumps, n, lambda d: escrow(d).update(amount=199))[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "winning bid" in evidence(report, P.ESCROW)
+
+
+def test_a_release_recorded_with_a_refund_reference_is_an_illegal_transition():
+    history, dumps, leaders = scenario()
+    dumps = {n: edit_dump(dumps, n, lambda d: escrow(d).update(settlement_ref="RFD-KARAN1"))[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "RELEASED" in evidence(report, P.ESCROW)
+
+
+def test_held_money_that_already_has_a_settlement():
+    history, dumps, leaders = scenario()
+    dumps = {n: edit_dump(dumps, n, lambda d: escrow(d).update(status="HELD"))[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "HELD" in evidence(report, P.ESCROW)
+
+
+def test_an_escrow_status_that_does_not_exist():
+    history, dumps, leaders = scenario()
+    dumps = {n: edit_dump(dumps, n, lambda d: escrow(d).update(status="PENDING"))[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "PENDING" in evidence(report, P.ESCROW)
+
+
+def test_a_none_escrow_with_leftover_fields():
+    history, dumps, leaders = scenario()
+
+    def reset(d):
+        escrow(d).update(status="NONE", settlement_ref="")
+
+    dumps = {n: edit_dump(dumps, n, reset)[n] for n in dumps}   # payer, amount, payment_ref still set
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report)
+
+
+def test_an_escrow_on_an_auction_that_is_not_closed():
+    history, dumps, leaders = scenario()
+
+    def reopen(d):
+        d["auctions"][0].update(closed=False, winner=None, closed_at=None)
+
+    dumps = {n: edit_dump(dumps, n, reopen)[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "closed" in evidence(report, P.ESCROW)
+
+
+def test_an_acknowledged_payment_that_is_not_in_the_state():
+    history, dumps, leaders = scenario()
+
+    def lose(d):
+        escrow(d).update(status="NONE", amount=0, payer="", payment_ref="", settlement_ref="")
+
+    dumps = {n: edit_dump(dumps, n, lose)[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "PAY-KARAN1" in evidence(report, P.ESCROW)
+
+
+def test_an_acknowledged_payment_whose_reference_differs_from_the_state():
+    history, dumps, leaders = scenario()
+    for r in history:
+        if r["op"] == "pay" and r["outcome"] == "ok":
+            r["reference"] = "PAY-SOMETHING-ELSE"
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "PAY-SOMETHING-ELSE" in evidence(report, P.ESCROW)
+
+
+def test_a_release_and_a_refund_both_acknowledged():
+    history, dumps, leaders = scenario()
+    history.append(rec("seller", 4, "refund", "ok", 44, auction_id=1, reference="RFD-KARAN1"))
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "release" in evidence(report, P.ESCROW)
+
+
+def test_an_acknowledged_release_the_state_does_not_show():
+    history, dumps, leaders = scenario()
+
+    def undo(d):
+        escrow(d).update(status="HELD", settlement_ref="")
+
+    dumps = {n: edit_dump(dumps, n, undo)[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "release" in evidence(report, P.ESCROW)
+
+
+def test_a_payment_refused_as_not_the_winner_when_the_payer_was_the_winner():
+    history, dumps, leaders = scenario()
+    for r in history:
+        if r["op"] == "pay" and r["outcome"] == "rejected" and "not the winner" in r["reason"]:
+            r["user"] = r["client"] = "karan"
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "not the winner" in evidence(report, P.ESCROW)
+
+
+def test_a_payment_refused_as_already_paid_when_nothing_was_paid():
+    history, dumps, leaders = scenario()
+
+    def lose(d):
+        escrow(d).update(status="NONE", amount=0, payer="", payment_ref="", settlement_ref="")
+
+    dumps = {n: edit_dump(dumps, n, lose)[n] for n in dumps}
+    history = [r for r in history if not (r["op"] in ("pay", "release") and r["outcome"] == "ok")]
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "already" in evidence(report, P.ESCROW)
+
+
+def test_a_refusal_for_a_reason_the_checker_does_not_know():
+    history, dumps, leaders = scenario()
+    history.append(rec("mrudul", 6, "pay", "rejected", 44, auction_id=1, amount=200, reason="the moon is in the wrong phase"))
+    report = check_all(history, dumps, leaders)
+    assert P.ESCROW in failed(report) and "unexpected reason" in evidence(report, P.ESCROW)
+
+
+# --- summaries ----------------------------------------------------------------------------------
+
+
+def test_two_accepted_summaries_on_one_auction():
+    history, dumps, leaders = scenario()
+    dumps = {n: edit_dump(dumps, n, lambda d: d["auctions"][0]["summaries"].append("a second one"))[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.SUMMARIES in failed(report) and "2 summaries" in evidence(report, P.SUMMARIES)
+
+
+def test_a_summary_on_an_auction_that_is_not_closed():
+    history, dumps, leaders = scenario()
+
+    def reopen(d):
+        d["auctions"][0].update(closed=False, winner=None, closed_at=None, escrow=dict(
+            status="NONE", amount=0, payer="", payment_ref="", settlement_ref=""))
+
+    dumps = {n: edit_dump(dumps, n, reopen)[n] for n in dumps}
+    report = check_all([r for r in history if r["op"] not in ("pay", "release")], dumps, leaders)
+    assert P.SUMMARIES in failed(report) and "not closed" in evidence(report, P.SUMMARIES)
+
+
+def test_an_empty_summary_text_was_accepted():
+    history, dumps, leaders = scenario()
+    dumps = {n: edit_dump(dumps, n, lambda d: d["auctions"][0].update(summaries=["  "]))[n] for n in dumps}
+    report = check_all(history, dumps, leaders)
+    assert P.SUMMARIES in failed(report) and "empty" in evidence(report, P.SUMMARIES)
+
+
+def test_summaries_that_differ_between_nodes_are_caught_by_identical_not_skipped():
+    history, dumps, leaders = scenario()
+    dumps = edit_dump(dumps, "n2", lambda d: d["auctions"][0].update(summaries=["something else"]))
+    report = check_all(history, dumps, leaders)
+    assert P.IDENTICAL in failed(report) and "summaries" in evidence(report, P.IDENTICAL)
