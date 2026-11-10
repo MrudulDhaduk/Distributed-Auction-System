@@ -410,6 +410,58 @@ replicas agreed. The post-close bid was refused. All eight properties pass.
 
 ---
 
+## 6.1 Chunk 7: the chaos run with payments and summaries
+
+**Changes to the run.** The workload gained `Payer` actors (one per user: pay
+the auctions that user won, now and then pay a second time or pay an auction
+somebody else won) and the `Seller` settles its own auctions (release 80%,
+refund 20%, now and then the OTHER settlement afterwards). Payers and sellers
+READ (`GetAuction`, `GetEscrow`), which the workload never did before, so
+read-index is now exercised under faults. The checker has two more properties
+([payment-and-llm.md](payment-and-llm.md) section 3). The LLM server was
+`harness/fake_llm.py` (`--fake-llm`: canned text, same gRPC service), not the
+real model (decisions.md C22), so what this run tests is the leader-only
+summary worker and `RecordSummary` through the log, under faults.
+
+**Run.** `scripts\chaos.py --duration 600 --fake-llm`, seed **396704**,
+2026-11-10, exit 0. Output `runs\chaos-396704-20261110-125757\` (local only).
+
+| | |
+|---|---|
+| faults | 57 planned, 57 applied: 18 kill_leader, 12 kill_follower, 9 suspend_leader, 9 kill_two, 9 suspend_follower |
+| writes | 11 978: bids 11 719 (9 674 ok, 1 982 rejected, 63 unknown), creates 69, logins 12, payments 100 (64 ok, 36 rejected), releases 58 (54 ok, 4 rejected), refunds 20 (10 ok, 10 rejected) |
+| races | 1 224 |
+| unknown outcomes | 63, all bids |
+| leader terms seen | 44 |
+| final state | 69 auctions, all closed, all 69 with exactly one summary; escrow RELEASED 54, REFUNDED 10, NONE 5; all three nodes at `digest_index` 12 099 |
+| workload errors | 0; cluster went quiet |
+
+```
+PASS  history-well-formed  (checked 11978)
+PASS  acked-writes-on-every-node-exactly-once  (checked 29649)
+PASS  replicas-identical  (checked 3)
+PASS  bids-strictly-increasing-winner-is-max  (checked 207)
+PASS  no-bid-accepted-after-close  (checked 38699)
+PASS  rejections-consistent-with-final-state  (checked 1982)
+PASS  unknown-outcome-at-most-once  (checked 189)
+PASS  at-most-one-leader-per-term  (checked 88)
+PASS  escrow-legal-and-at-most-one-payment  (checked 385)
+PASS  summary-at-most-one-on-closed-auction  (checked 207)
+ALL PROPERTIES PASS
+```
+
+What this does and does not show. It shows that, over 57 real faults, no
+acknowledged payment or settlement was lost or duplicated, no escrow was in an
+illegal state, and every closed auction ended with one summary, including
+across leader changes. The 36 refused payments (second payments and non-winners)
+and the 14 refused settlements were each checked against the final state. It
+does **not** show anything about the real model under faults, and no network
+partition, clock skew or disk fault was injected (existing gaps).
+
+One observation, not a defect: the highest term seen was 118 (44 distinct
+leader terms), mostly from the `kill_two` episodes (a lone node with no majority keeps timing out), as in the
+earlier 10-minute runs.
+
 ## 7. Known gaps
 
 1. **A resumed follower deposes a healthy leader.** A follower suspended for

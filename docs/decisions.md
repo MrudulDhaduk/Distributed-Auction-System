@@ -2161,3 +2161,484 @@ end of that file.
                 parent of old, unrelated processes. Now a process only counts
                 as a child if it was created after the parent, and the harness
                 is never on the list.
+
+---
+
+## Payment, LLM wiring, checker (chunk 7)
+
+Code: `auction/state.py` (escrow commands), `server/payment_gateway.py`,
+`server/payment_servicer.py`, `client/auction_client.py` (`post`/`get`).
+Walkthrough: [payment-and-llm.md](payment-and-llm.md). Known gaps: the last
+section of that file.
+
+**Changes to M1 code in this chunk** (CLAUDE.md asks to say so): `auction/state.py`
+gained new command dataclasses, two rule functions and two new `isinstance`
+branches in `apply()`, placed before its final "not recognised" return. The
+`CreateAuction`, `PlaceBid` and `CloseAuction` branches are unchanged.
+`server/serve.py` registers one more service. Nothing else in `server/`,
+`sessions/` or `llm_server/` changed in step 1.
+
+### C1. Escrow lives in a lazily created `auction["escrow"]` key; `CreateAuction` is untouched
+- Chose:        the first `PayAuction` creates `auction["escrow"]` (status,
+                amount, payer, payment_ref, settlement_ref). Until then the key
+                is absent and `escrow_of(auction)` returns the NONE record.
+                The three escrow commands are added as new `isinstance` branches
+                in `apply()`.
+- Alternatives: add `"escrow": NONE_RECORD` to the dict `CreateAuction` builds
+                (changes an M1 branch and every test that compares auction
+                dicts); a separate `escrows` dict next to `auctions` (two tables
+                to snapshot, copy and digest).
+- Why:          the instruction was to leave the existing `apply()` logic
+                untouched. A missing key meaning NONE costs one helper and
+                keeps the M1 branches byte-for-byte as written.
+- Paper:        none (§2 "replicated state machine": the state is whatever
+                `apply()` builds from the log).
+- Viva Q:       "Why isn't escrow created with the auction?"
+- Answer:       So the M1 `CreateAuction` code did not have to change. An
+                auction nobody has paid for has no escrow record, and every read
+                goes through `escrow_of`, which says NONE. All replicas do the
+                same, so they agree.
+
+### C2. The gateway is called by the leader's handler before proposing; its reference rides on the command as data
+- Chose:        `PaymentServicer.Pay` calls `gateway.authorize(...)` on the
+                leader, then proposes `PayAuction(..., payment_ref=<reference>)`.
+                `apply()` stores the reference and never calls the gateway.
+                Release and refund do the same with `settlement_ref`.
+- Alternatives: call the gateway inside `apply()` (every replica would charge
+                once: three charges, and non-deterministic); call it after the
+                commit (a crash between commit and call loses the payment, and
+                needs an outbox); skip the gateway and just flip a flag.
+- Why:          the same rule as the LLM text and the session token: take the
+                non-deterministic or external part once, outside `apply()`,
+                and replicate the result as plain data (llm.proto's "call
+                first, replicate second").
+- Paper:        §2 (state machine must be deterministic).
+- Viva Q:       "Your payment goes through a gateway. What happens on three
+                nodes?"
+- Answer:       Only the leader's handler talks to the gateway, once. The three
+                replicas only see a command that carries the reference string.
+                `apply()` does no I/O, so replaying the log never charges
+                anyone again.
+
+### C3. Pre-check, then propose anyway: `apply()` stays the judge, and a retry still gets the stored answer
+- Chose:        the handler runs the SAME rule functions `apply()` runs
+                (`payment_rejection`, `settlement_rejection`) after a read
+                barrier. If they pass, it calls the gateway. If they fail, it
+                does NOT call the gateway but still proposes the command with an
+                empty reference. `apply()` then refuses it with the real reason
+                (or, for a retry of something already committed, the replicated
+                dedupe table returns the stored first response).
+- Alternatives: return the pre-check's refusal directly (a retry of a
+                committed payment would be told "already HELD", not the original
+                success: not idempotent); no pre-check, always authorize, void on
+                refusal (works, but a non-winner's card is authorized then
+                voided on every wrong attempt); have the handler read the dedupe
+                table (private to the state machine).
+- Why:          idempotence under retries is a stated requirement. Proposing
+                the doomed command is how the existing dedupe path gets its
+                chance to answer. The cost is a refused command in the log,
+                which the design already accepts for losing bids ("the log holds
+                attempts; apply() decides outcomes").
+- Paper:        §8 (serial numbers; the state machine answers a duplicate from
+                its table).
+- Viva Q:       "Why do you propose a payment you already know will fail?"
+- Answer:       Because "already paid" might mean "you are retrying and it
+                worked". Only the replicated dedupe table can tell those apart.
+                So I propose it and let `apply()` decide. A rejected command is
+                just a log entry, like a bid that is too low.
+
+### C4. The gateway's idempotency key is `client_id:seq`; its reference is a hash of its inputs
+- Chose:        `authorize(payer, amount, auction_id, key)` returns
+                `PAY-` + the first 12 hex digits of sha256 of those four values.
+                The same inputs give the same reference on any gateway instance.
+                With no `client_id` there is no key and the reference is random.
+- Alternatives: a gateway ledger keyed by idempotency key (each node's
+                in-process stub has its own, so a new leader would not know the
+                first attempt); random references (a retry after an unknown
+                outcome could authorize twice).
+- Why:          after a failover the client's retry reaches a new leader whose
+                gateway never saw the first attempt. A reference derived from
+                the inputs makes the retry produce the same reference, so even
+                the case "the old leader authorized, died before committing, the
+                new leader authorizes again" ends with ONE logical payment.
+                A real gateway is external and shared; it would provide this
+                with an idempotency key. The stub gets it from the hash.
+- Paper:        §8.
+- Viva Q:       "A retry after the leader dies reaches a different gateway
+                stub. Can the winner be charged twice?"
+- Answer:       Not by this stub: both stubs derive the same reference from the
+                same client id and sequence number, and `apply()` accepts only
+                one payment per auction anyway. What the stub cannot do is keep
+                a ledger, because in-process memory does not survive a leader
+                change. A real gateway would.
+
+### C5. If `apply()` refuses a payment the gateway authorized, the handler voids it. A release or refund cannot be undone
+- Chose:        `Pay` calls `gateway.void(ref)` when `payment_ref` was obtained
+                but the applied result is a refusal. `ReleaseEscrow` and
+                `RefundEscrow` have no compensation.
+- Alternatives: no compensation (an orphaned hold); two-phase commit with the
+                gateway (far beyond a mock).
+- Why:          an authorization is reversible, a payout is not. The per-auction
+                lock plus the pre-check make a refused settlement impossible on
+                one leader; it could still happen when two different leaders'
+                handlers race across a failover.
+- Paper:        none.
+- Viva Q:       "Is the gateway call atomic with the Raft commit?"
+- Answer:       No. They are two systems. Authorization is made safe by
+                idempotency and by voiding on refusal. A payout across a
+                failover race is a known gap, written down.
+
+### C6. Only the seller releases or refunds; RELEASED and REFUNDED are final; the winner cannot refund themselves
+- Chose:        `settlement_rejection`: the escrow must be HELD and the caller
+                must be the auction's owner. RELEASED and REFUNDED accept
+                nothing further, including a new `PayAuction`.
+- Alternatives: the winner releases (the usual "buyer confirms receipt");
+                either party refunds; allow a re-pay after a refund.
+- Why:          the assignment wording was "seller confirmation". If the winner
+                could refund themselves, escrow would protect nobody. A final
+                state is what lets the checker say "at most one payment, legal
+                transitions only".
+- Paper:        none.
+- Viva Q:       "Why can't the buyer get their money back on their own?"
+- Answer:       Because then the seller has no protection. In this model the
+                seller decides to release or cancel; a real system would add a
+                dispute path. That is not built.
+
+### C7. The client states the amount; `apply()` checks that it equals the winning bid
+- Chose:        `PayRequest.amount` is what the winner intends to pay;
+                `payment_rejection` refuses anything other than the winning bid.
+- Alternatives: no amount in the request (the server fills it in); accept any
+                amount at least the winning bid.
+- Why:          the requirement said "the amount equals the winning bid". The
+                client sending it makes a wrong amount an observable refusal
+                instead of a silent default.
+- Paper:        none.
+- Viva Q:       "Why does the payer send an amount at all?"
+- Answer:       So a mistake is visible. If it is not exactly the winning bid,
+                the answer is "no" with the real figure.
+
+### C8. A separate `PaymentService` and `payment.proto`; `Result` is redeclared there
+- Chose:        four RPCs in their own service: `Pay`, `ReleaseEscrow`,
+                `RefundEscrow`, `GetEscrow`. `payment.Result` duplicates the
+                shape of `auction.Result`.
+- Alternatives: add the RPCs to `AuctionService` (its servicer takes no gateway
+                and every M1 test builds it with three arguments); import
+                `auction.proto` (protoc emits a bare `import auction_pb2` that
+                `gen_proto.py` only repairs in `*_grpc` files).
+- Why:          `AuctionServicer` stays as it was; the new servicer owns the
+                gateway. `llm.proto` stands alone for the same import reason.
+- Paper:        none.
+- Viva Q:       "Why a new service for three methods?"
+- Answer:       Different dependency (it needs the payment gateway) and the M1
+                servicer and its tests stay untouched.
+
+### C9. `post(token, type, data)` and `get(token, type, params)` are real functions on `ClusterClient`; the wire stays typed
+- Chose:        `post` dispatches "auction", "bid", "payment" to the typed
+                methods; `get` dispatches "auction", "auctions", "escrow". They
+                send the token they are given, and raise `ValueError` naming the
+                problem before any RPC.
+- Alternatives: one untyped RPC with a type string and a payload map (auction.proto
+                and llm.proto already turned that shape down); leave the
+                signatures as a comment in the .proto (what M1 did; the audit
+                found `client/` had neither function).
+- Why:          the assignment prescribes these signatures. Typed RPCs are the
+                better wire design; the adapters keep that choice from reading as
+                non-compliance. Same pattern as `get_llm_answer`.
+- Paper:        none.
+- Viva Q:       "Where is `post()`?"
+- Answer:       `ClusterClient.post` in `client/auction_client.py`. It checks its
+                arguments and calls the typed RPC for the `type` you gave it.
+
+### C10. A per-auction lock in the payment handler
+- Chose:        one `threading.Lock` per auction id, held across read barrier,
+                pre-check, gateway call, propose and wait.
+- Alternatives: no lock (two payment calls for one auction on one leader can
+                both pass the pre-check and both reach the gateway); one global
+                lock (serialises unrelated auctions).
+- Why:          it closes the gap between "checked" and "proposed" for a single
+                leader. It is a handler-layer lock: nothing holds the Raft node
+                lock across an RPC (E3 still holds). It does not close the
+                two-leaders-across-a-failover race; `apply()` still does.
+- Paper:        none.
+- Viva Q:       "You hold a lock while waiting for Raft. Doesn't that break E3?"
+- Answer:       E3 is about the node's own lock, which is never held during an
+                outgoing RPC. This one is per auction, in the handler, and
+                payments are rare.
+
+### C11. Escrow is in the canonical digest, always present
+- Chose:        every auction in `replication/digest.py`'s canonical form carries
+                an `escrow` object (the NONE record for an unpaid auction).
+- Alternatives: include it only when set (a different shape per auction);
+                leave it out (the dashboard and `replicas-identical` could not
+                see a replica that disagrees about who holds the money).
+- Why:          escrow is replicated state. The checker's identity test must
+                cover it, or a diverged escrow would pass.
+- Paper:        none.
+- Viva Q:       "How do you know the replicas agree about the escrow?"
+- Answer:       It is part of the state digest every node reports, and the
+                checker compares the full JSON as well.
+
+### Step 2: the LLM wired into the app
+
+**Changes to M1 code in step 2** (own commit, as CLAUDE.md asks):
+`server/llm_client.py` (deadline, return value, one more dispatch branch),
+`server/auction_servicer.py` (`_describe` unpacks the tuple; `GetAuction`
+returns `summary`), `llm_server/llm_servicer.py`, `llm_server/config.py` and
+`proto/llm.proto` (a fourth job, one constant). `auction/state.py` gained two
+more commands in the same additive way as step 1.
+
+### C12. `get_llm_answer` returns `(request_id, answer)` and every call has a deadline
+- Chose:        `LLMClient.get_llm_answer` returns the pair from the RESPONSE
+                and passes `timeout=` (default `APP_DEADLINE_SECONDS`, 25 s)
+                to every stub call. The one M1 caller, `_describe`, unpacks it.
+- Alternatives: keep returning the string (the handout says
+                `(requestId, answer)`, so R12 stays only half true); put the
+                deadline on the channel or in each caller.
+- Why:          the pair comes from the response, so a server that answered a
+                different request shows. The deadline in the one adapter means
+                no caller can forget it: before this, a hung LLM process held a
+                handler thread until the client's own timeout. 25 s sits below
+                Ollama's 30 s backstop, so the app gives up first. The first
+                call after loading the model took 15.75 s on this machine,
+                which fits inside it.
+- Paper:        none.
+- Viva Q:       "What if the LLM server hangs?"
+- Answer:       Every call carries a 25-second deadline. When it runs out the
+                handler reports a clear "assistant did not answer in time" and
+                carries on. Bidding never waits on the model.
+
+### C13. An LLM failure is a clear answer in `Result`, not a gRPC error
+- Chose:        `AskAssistant`, `GenerateDescription`, `GetPriceTrends` return
+                `Result(success=false, reason="the assistant ...; the auction
+                is unaffected")` for a down, slow or failing model.
+- Alternatives: abort with UNAVAILABLE / DEADLINE_EXCEEDED (llm.proto's choice
+                for the LLM server itself).
+- Why:          `ClusterClient` retries UNAVAILABLE and DEADLINE_EXCEEDED on
+                every node for up to 30 s. Against a model that is not coming
+                back that is a minute of pointless calls and a long wait for
+                the user. At this layer "the assistant is down" is an expected
+                outcome, which auction.proto already says belongs in the body.
+- Viva Q:       "llm.proto says failures are status codes. Why not here?"
+- Answer:       Between the LLM server and the app server they are. Between the
+                app server and a client the retry logic would misread a dead
+                model as a dead node. So the app server turns it into a plain
+                answer.
+
+### C14. The FAQ and the trends are leader-only, after a read barrier, and the model is called with no lock held
+- Chose:        `check_leader` -> `read_barrier` -> snapshot the state under
+                `state.lock` -> release -> call the model -> reply. Followers
+                redirect and never call the model.
+- Alternatives: serve from any node's local state (can be stale, and N nodes
+                would each hold CPU-bound model calls); hold the lock across
+                the call.
+- Why:          same reasoning as A15 for reads: a deposed leader must not put
+                stale state into a prompt. A model call is seconds long; a
+                lock held that long would stall `apply()` on the applier.
+- Paper:        §8 (read-only operations on the leader need a heartbeat round).
+- Viva Q:       "Which node's auction state does the model see?"
+- Answer:       The leader's, after it confirmed it is still the leader and
+                has applied everything committed. Then the lock is released
+                before the slow call.
+
+### C15. Description on request: the pre-check refuses without proposing; only the text is replicated
+- Chose:        `GenerateDescription` checks owner / open / has attributes with
+                the same `description_rejection` apply uses, asks the model, then
+                proposes `SetDescription(auction_id, actor, text)`.
+- Alternatives: propose a doomed command so the dedupe table answers a retry
+                (C3's pattern).
+- Why:          unlike a payment nothing external moved; the cost of a retry is
+                one wasted model call and the dedupe table still stops a second
+                `SetDescription`. A refusal before the call also saves seconds of
+                CPU on text `apply()` would reject.
+- Viva Q:       "Does the log record that an LLM was called?"
+- Answer:       No. It records a `SetDescription` with the generated string.
+                Replaying the log never calls the model.
+
+### C16. The summary worker is its own thread and finds work by scanning the state
+- Chose:        `SummaryWorker` (server/summarizer.py), one per node, acting
+                only while leader. Work = closed auctions with no accepted
+                summary, found by scanning `AuctionState` each pass. A failed
+                model call pauses that auction for 10 s (monotonic clock).
+- Alternatives: call the model inside the closer's tick (a 15 s call would stall
+                the 250 ms close clock); trigger from the applier when a close is
+                applied (runs on every node, and a leader that dies right after
+                the close loses the work); keep a work queue in memory (lost on
+                failover).
+- Why:          scanning the replicated state means a new leader needs no
+                hand-over: it simply sees closed auctions without a summary.
+- Paper:        §8-style "the new leader derives what to do from the log".
+- Viva Q:       "The leader dies between the close and the summary. What
+                happens?"
+- Answer:       The new leader's worker scans the state, sees a closed auction
+                with no summary, and generates it. A test crashes the leader at
+                exactly that point.
+
+### C17. A summary is idempotent because an auction takes at most one; the state keeps accepted summaries as a list
+- Chose:        `summary_rejection`: closed, no accepted summary, non-empty.
+                `RecordSummary` stores `auction["summaries"] = [text]`; the
+                digest and checker see the list.
+- Alternatives: a plain `summary` string (a buggy `apply` that accepted two
+                would silently overwrite, and the checker could never see it);
+                make `RecordSummary` replace an existing summary.
+- Why:          two leaders can both generate; `apply()` keeps the first and
+                refuses the second, so the text stays stable across replays.
+                As a list, "at most one" is something a checker can verify.
+- Viva Q:       "Two leaders both summarise. Which text wins?"
+- Answer:       The first one committed. The second is refused by `apply()`
+                and dropped. Every replica applies them in the same order, so
+                every replica keeps the same text.
+
+### C18. A fourth LLM job for price trends, and the server states the facts
+- Chose:        `SummarisePriceTrends` in llm.proto. The app server sends closed
+                auctions as points; the LLM server's prompt builder computes
+                counts, lowest/highest winning bid and direction IN CODE, puts
+                them in the user turn as FACTS, and tells the model to repeat
+                them. The app server also computes the same statistics and
+                returns them with the summary.
+- Alternatives: reuse `SummariseAuctionResult` (it describes one auction);
+                give the model only the list and let it find the extremes.
+- Why:          measured on the live model: given only the list, it said "the
+                lowest winning bid is 0 (auction 3)" for an auction nobody bid
+                on. Arithmetic belongs in code. The model's job is wording.
+- Viva Q:       "Can the model make up a price in the trend summary?"
+- Answer:       It can still word things badly, which is why the numbers are
+                also returned separately, computed in code. The prompt gives it
+                the exact figures and forbids new ones. That reduces the risk;
+                it does not remove it, and the model's text is not tested for
+                truth.
+
+### C19. `processBusinessRequest` is a real RPC that only dispatches; the client adapter calls it
+- Chose:        `BusinessService.ProcessBusinessRequest(request_id, payload,
+                context)` (proto/business.proto, server/business_servicer.py).
+                `payload` is JSON text `{"method": "post"|"get", "type", "data"}`.
+                The servicer parses it, validates every field (a bad one is
+                INVALID_ARGUMENT naming the field, before anything is
+                proposed), builds the typed request and calls the EXISTING
+                handler (AuctionServicer / PaymentServicer / AssistantServicer)
+                with the SAME gRPC context. The handler's typed response comes
+                back packed in an `Any`. `ClusterClient.process_business_request`
+                now calls this RPC. The typed RPCs stay; the chaos harness and
+                the checker use them.
+- Alternatives: a client-side adapter only (what C19 first chose in this chunk;
+                it deviates from "a server function", so R12 stayed PARTIAL);
+                re-implementing the operations inside the new RPC (two
+                implementations to keep equal); a protobuf `Struct` payload
+                (integers pass through a double, and epoch microseconds are
+                about 1.8e15).
+- Why:          the assignment names a server-side function. Dispatching to the
+                existing handlers with the same context means "same auth, same
+                leader rules" is inherited, not copied: the interceptor wraps
+                the service like any other, `context.username` is the validated
+                user, and the handlers do their own leader check, read barrier,
+                dedupe and error mapping, so NOT_LEADER with its leader-addr
+                trailing metadata and UNAVAILABLE for an unknown outcome reach
+                the client unchanged. A write's `(client_id, seq)` is a field of
+                the request, not of the payload.
+- Cost:         an untyped payload, which auction.proto and llm.proto turned
+                down for the typed RPCs. Hence the field-by-field validation and
+                the tests that feed it malformed payloads. Nothing in `payload`
+                or `context` is ever a credential: a test sends a valid token
+                only there and gets UNAUTHENTICATED.
+- Paper:        none (§8 for the dedupe, inherited).
+- Viva Q:       "Where is `processBusinessRequest`, and does it bypass anything?"
+- Answer:       `BusinessServicer.ProcessBusinessRequest`. It bypasses nothing:
+                it sits behind the same auth interceptor and calls the same
+                handlers with the same context, so every rule they enforce
+                applies. It only parses the payload and picks the handler.
+
+### C20. The price statistics are returned even when the model is down
+- Chose:        `GetPriceTrendsResponse` always carries `stats` and `points`
+                computed in code; `result.success` describes only the summary.
+- Alternatives: fail the whole call when the model fails.
+- Why:          the numbers need no model. A client with the model down still
+                gets the useful half, plus a clear reason for the missing text.
+- Viva Q:       "What does price_trends return with the LLM down?"
+- Answer:       The statistics, and `success=false` with the reason for the
+                missing summary.
+
+### Step 3 and a test-environment finding
+
+### C21. pytest runs with `--capture=sys`: fd-level capture corrupted a node's log in tests
+- Finding:      `tests/test_workload.py` began failing on restart of the
+                killed node with `CorruptStorageError: record at byte N: header
+                checksum mismatch`. The damaged `log.bin` ended with gRPC
+                C-core's own log line (`chttp2_transport.cc: Got goaway [2]
+                ...`). Measured: with pytest's default capture, 11 of 14 runs on
+                UNMODIFIED code (`git worktree` of HEAD) and 4 of 10 on this
+                chunk's code failed; with `-s` 0 of 14, with `--capture=sys`
+                0 of 10 and then 0 of 12 across three gRPC-heavy test files.
+- Likely cause (inferred, not proven): default capture replaces file descriptor
+                2 for the whole process. The C core had cached the original
+                stderr handle; on Windows that handle is closed by the
+                replacement and its number is reused, so a log line was written
+                into whatever file got it, here an open `log.bin`. It was
+                already latent on HEAD and shows up depending on which handle
+                numbers the process happens to get.
+- Chose:        `addopts = --capture=sys` in `pytest.ini`.
+- Alternatives: change `FileStorage` (`raft/` is off limits unless a test proves
+                it is needed, and the storage is behaving correctly: it
+                detected the damage and refused to start, which is what P7 says
+                it must do); `-s` always (prints everything); retry the test.
+- Why:          the damage is done by the test runner, not by the storage or the
+                protocol. A restarted node refusing to start on a corrupt log is
+                the designed behaviour.
+- Cost:         gRPC's own log lines now print to the terminal during the suite.
+- Viva Q:       "Your own storage reported corruption in a test. Is it safe?"
+- Answer:       That was the storage doing its job: it found foreign bytes in
+                the middle of the log and refused to start. The foreign bytes
+                were a log line from gRPC written through a recycled Windows
+                file handle under pytest's output capture. Reproduced on code
+                from before this chunk, gone when capture is Python-level only.
+
+### C22. Two new checker properties; the chaos run uses a canned-answer LLM server
+- Chose:        `escrow-legal-and-at-most-one-payment` and
+                `summary-at-most-one-on-closed-auction` in `checker/properties.py`,
+                each with broken-input tests. `scripts/chaos.py --fake-llm` runs
+                `harness/fake_llm.py` (same gRPC service as the real LLM server,
+                canned text, instant).
+- Alternatives: run chaos against the real model (a 4B model on the CPU for 10
+                minutes shares cores with Raft's 0.5 to 1.0 s election
+                timeouts, and a stall there would look like a consensus fault);
+                `--no-llm` (no summaries, so the summary property would check
+                nothing).
+- Why:          what chaos should test is the distributed behaviour around the
+                LLM: the leader-only worker, `RecordSummary` through the log, a
+                summary after failover. It cannot say the real model is fine.
+                That is shown by the demo run and the live checks.
+- Viva Q:       "Did the chaos run use the real LLM?"
+- Answer:       No, a canned-answer server with the same gRPC interface. The
+                real model is exercised in the demo. I did not claim chaos
+                results for it.
+
+### C23. The result-summary prompt gets computed facts and no times (Step 4 follow-up)
+- Chose:        `build_summary_messages` now states the facts in code: item,
+                status, number of bids and distinct bidders, opening bid and who
+                made it, closing bid, winner and winning bid (for an open
+                auction: the leading bidder). No timestamp of any kind and no
+                list of bids reaches the prompt. The system turn says the model
+                is given no times and must not state or imply any. The user turn
+                is still the fixed "Summarise this auction.".
+- Alternatives: keep the bid list and the scheduled close and forbid listing and
+                timing in prose (the M1 prompt, which failed twice); pass the
+                numbers and also check the model's text in code.
+- Why:          measured: the M1 prompt made the live model list the bids,
+                repeat their timestamps and write "did not end at that time".
+                Removing the material is stronger than forbidding its use. The
+                same reasoning as C18 for the trends.
+- Result on the live model, one call, the demo's 7-bid auction: "A vintage clock
+                auction ended with 7 bids from 3 bidders. The opening bid was 100
+                by karan, and the closing bid was 40. Mrudul won with a bid of
+                400." 31 words, 5.49 s. It lists no bids and gives no times.
+                **It is wrong in one place: the closing bid was 400, not 40.**
+                The facts were right and the model dropped a digit.
+- Not solved:   the model can still misstate a number it was given. A cheap
+                check would be to reject any summary containing a number that is
+                not in the facts block, in code, before it is replicated. Not
+                built; written down as a gap (payment-and-llm.md section 4).
+- Cost:         the item name and bidder names are still in the system turn (the
+                known soft spot of this job), now inside the FACTS block.
+- Viva Q:       "How do you stop the model inventing things in the summary?"
+- Answer:       I take away what it could invent from. It gets no times and no
+                bid list, only computed facts. That stopped the listing and the
+                timing claims in the one live call I ran. It does not stop a
+                wrong digit, and I say so; the next step would be a check in code.
