@@ -1,11 +1,13 @@
 # One-command demo: opens the dashboard in a second window, then runs the
 # scripted auction in this one (scripts/demo.py): LLM server + 3 nodes,
-# bids, kill -9 the leader mid-auction, keep bidding, restart the dead node,
-# then the property checker prints PASS/FAIL per property.
+# login, bids, an LLM answer about the live auction, kill -9 the leader
+# mid-auction, restart it, the close, the LLM-written result summary, the
+# winner paying into escrow, a SECOND leader kill with the same escrow read
+# back, price trends, then the property checker prints PASS/FAIL per property.
 #
 #   .\scripts\demo.ps1                 # 2 s between steps
 #   .\scripts\demo.ps1 -Pause 4        # slower, for presenting
-#   .\scripts\demo.ps1 -NoLLM          # without the LLM server (description "")
+#   .\scripts\demo.ps1 -NoLLM          # without the LLM server (LLM steps show the clear error)
 #
 # Uses the run_cluster.ps1 ports (peer 50061-50063, client 50071-50073, LLM
 # 50052): do not run both at once. Output under runs\demo-<time>\.
