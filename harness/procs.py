@@ -68,29 +68,49 @@ if os.name == "nt":
     _kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry)]
     _kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry)]
 
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+
+    def _created(pid):
+        """Creation time (FILETIME ticks), or None if the process is gone
+        or not ours to open."""
+        handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            c, e, k, u = (wintypes.FILETIME() for _ in range(4))
+            if not _kernel32.GetProcessTimes(handle, ctypes.byref(c), ctypes.byref(e), ctypes.byref(k), ctypes.byref(u)):
+                return None
+            return (c.dwHighDateTime << 32) | c.dwLowDateTime
+        finally:
+            _kernel32.CloseHandle(handle)
+
     def process_tree(pid: int) -> list:
-        """[pid, its children, their children, ...] from a snapshot."""
+        """[pid, its children, their children, ...] from a snapshot, with
+        stale parent links removed (see descendants())."""
         snap = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
         if snap in (None, wintypes.HANDLE(-1).value):
             raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
-        children = {}
+        parent = {}
         try:
             entry = _ProcessEntry()
             entry.dwSize = ctypes.sizeof(_ProcessEntry)
             ok = _kernel32.Process32FirstW(snap, ctypes.byref(entry))
             while ok:
-                children.setdefault(entry.th32ParentProcessID, []).append(entry.th32ProcessID)
+                parent[entry.th32ProcessID] = entry.th32ParentProcessID
                 ok = _kernel32.Process32NextW(snap, ctypes.byref(entry))
         finally:
             _kernel32.CloseHandle(snap)
-        tree, todo = [], [pid]
-        while todo:
-            p = todo.pop()
-            if p in tree:
-                continue
-            tree.append(p)
-            todo.extend(children.get(p, []))
-        return tree
+        return descendants(pid, parent, _LazyTimes(), exclude={os.getpid(), os.getppid()})
+
+    class _LazyTimes(dict):
+        """created[pid], looked up on first use: only the few processes
+        the walk actually visits are opened."""
+
+        def __missing__(self, pid):
+            value = _created(pid)
+            self[pid] = value
+            return value
 
     def _on_process(pid, access, fn):
         handle = _kernel32.OpenProcess(access, False, pid)
@@ -141,6 +161,36 @@ else:
         pass
 
     _CREATION_FLAGS = 0
+
+
+def descendants(pid: int, parent: dict, created, exclude=()) -> list:
+    """[pid, then every process descended from it], from a parent map
+    {pid: parent_pid} and creation times {pid: time}.
+
+    A process counts as a child of p only if it was created AFTER p. A
+    recorded parent PID is never updated when that parent exits, and
+    Windows recycles PIDs: a new process can be given the PID of a dead one
+    and would otherwise "adopt" every orphan that still names that PID. The
+    second 10-minute chaos run killed its own harness that way
+    (docs/decisions.md T19). `exclude` (the harness and its launcher) is
+    never included, whatever the times say: belt and braces.
+    """
+    children = {}
+    for c, p in parent.items():
+        children.setdefault(p, []).append(c)
+    tree, todo = [], [pid]
+    while todo:
+        p = todo.pop()
+        if p in tree:
+            continue
+        tree.append(p)
+        for c in children.get(p, []):
+            if c in exclude or c == p:
+                continue
+            tc, tp = created[c], created[p]
+            if tc is not None and tp is not None and tc >= tp:
+                todo.append(c)
+    return tree
 
 
 def hard_kill(p: subprocess.Popen, timeout: float = 10.0):

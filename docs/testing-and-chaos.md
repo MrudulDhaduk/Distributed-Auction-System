@@ -2,7 +2,7 @@
 
 Build-order step 7. Steps 3-6 built Raft and put the auction on it. This
 step tries to break it on purpose, then checks the result against written-down
-properties. Decisions T1-T18 are in [decisions.md](decisions.md#testing-and-chaos).
+properties. Decisions T1-T19 are in [decisions.md](decisions.md#testing-and-chaos).
 The numbers are in [stress-results.md](stress-results.md).
 
 ```
@@ -421,12 +421,16 @@ replicas agreed. The post-close bid was refused. All eight properties pass.
    ≤ 0.5 s), logging a WARNING each time, and fail-stops only if the refusal
    persists. Remaining gap: a lock held longer than 0.5 s still takes the
    node out, by design. Tests: `tests/test_storage_transient_replace.py`.
-9. **Three harness bugs found by the stress runs, all fixed** (T14, T16):
+9. **Harness bugs found by the stress and chaos runs, all fixed** (T14, T16, T19):
    waiting for identical digests before each kill (never happens under
    writes); counting the old leader's last ack as "first write after
    failover"; and a writer thread that outlived its cluster and was
    (correctly) refused UNAUTHENTICATED by the next config's fresh cluster on
    the same ports. Plus the status RPC throttling the node it observed (T16).
+   And (T19) the kill routine walking stale parent links after Windows reused
+   a PID: the second 10-minute chaos run (seed 79402) killed its own harness
+   at 562 s. Process trees now require a child to be created after its
+   parent, and never include the harness.
 10. **M1's `apply()` is O(bids) per PlaceBid** (`max(...)` over the
    auction's bid list, plus `_high_bid` in the state machine): 0.15 ms at
    1 000 bids, 2.85 ms at 25 000. Fine for real auctions. A single auction

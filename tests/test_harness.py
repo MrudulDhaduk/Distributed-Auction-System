@@ -201,3 +201,35 @@ def test_the_venv_python_is_a_launcher_and_the_tree_finds_the_interpreter(tmp_pa
         assert wait_until(lambda: len(procs.process_tree(p.pid)) >= 2, 10)
     finally:
         procs.hard_kill(p)
+
+
+# --- process trees and PID reuse --------------------------------------------------
+#
+# Found by the second 10-minute chaos run (seed 79402): the harness killed
+# ITSELF at 562 s (exit code 1 = our TerminateProcess, no traceback). A
+# process's recorded parent PID is never updated when the parent exits, so a
+# NEW process that is handed a recycled PID "adopts" every orphan that names
+# that PID as parent. Killing that new node's "tree" then killed unrelated
+# processes -- the harness's own launcher among them.
+
+
+def test_a_recycled_pid_does_not_adopt_older_orphans():
+    # pid 100: the node launcher just started (t=50), recycling a PID that a
+    # dead process used to have. pid 7 (t=10) names 100 as parent: an orphan
+    # of the OLD pid 100, created before the new one existed.
+    parent = {100: 1, 101: 100, 7: 100, 8: 7}
+    created = {100: 50.0, 101: 51.0, 7: 10.0, 8: 11.0}
+    assert procs.descendants(100, parent, created) == [100, 101]
+
+
+def test_real_descendants_are_all_found():
+    parent = {100: 1, 101: 100, 102: 101, 103: 100}
+    created = {100: 1.0, 101: 2.0, 102: 3.0, 103: 4.0}
+    assert sorted(procs.descendants(100, parent, created)) == [100, 101, 102, 103]
+
+
+def test_the_tree_never_contains_the_harness_or_its_launcher():
+    me, my_launcher = os.getpid(), os.getppid()
+    parent = {100: 1, my_launcher: 100, me: my_launcher}
+    created = {100: 1.0, my_launcher: 2.0, me: 3.0}  # even if the times say "child"
+    assert procs.descendants(100, parent, created, exclude={me, my_launcher}) == [100]

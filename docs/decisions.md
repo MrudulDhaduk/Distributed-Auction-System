@@ -2127,3 +2127,37 @@ end of that file.
                 port, which takes 2 seconds on this OS. Raft had a new leader
                 long before. The client's first retry goes to the node it
                 last talked to, and that's the dead one.
+
+### T19. Process trees: a child must be created after its parent (PID reuse killed the harness)
+- Finding:      the second 10-minute chaos run (seed 79402) stopped at 562 s
+                with exit code 1, no traceback, and every Python process gone
+                (harness, LLM, all nodes). Exit code 1 with no traceback is
+                what our own `TerminateProcess(handle, 1)` produces. Most
+                likely mechanism (inferred: the snapshot at that moment
+                wasn't logged): a process's recorded parent PID is never
+                updated when the parent exits, and Windows recycles PIDs. The
+                harness's launcher was started under Git Bash through a
+                short-lived MSYS helper, so its recorded parent is a dead PID.
+                When a restarted node's launcher was handed that recycled PID,
+                "kill this node's tree" walked into the harness's launcher and
+                killed it.
+- Chose:        `descendants(pid, parent, created, exclude)`, a pure
+                function: a process is a child of p only if its creation time
+                (GetProcessTimes) is >= p's, and the harness itself and its
+                launcher are never included. Tests:
+                `test_a_recycled_pid_does_not_adopt_older_orphans` and two
+                more in tests/test_harness.py.
+- Alternatives: kill only the launcher and rely on its job object (true for
+                the venv launcher, but suspend still needs the tree); a Job
+                Object per node created by the harness (cleanest on Windows,
+                more ctypes); psutil (does the same creation-time check, not
+                installed).
+- Why:          The creation-time rule is the standard fix (psutil applies
+                it too) and it's a few lines. The exclude set means that even
+                a wrong time can't make the harness kill itself again.
+- Viva Q:       "How can killing one node kill your test harness?"
+- Answer:       Windows reuses process IDs, and a child keeps its dead parent's
+                ID on record. A new process with a recycled ID looked like the
+                parent of old, unrelated processes. Now a process only counts
+                as a child if it was created after the parent, and the harness
+                is never on the list.
