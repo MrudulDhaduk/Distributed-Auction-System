@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x63ommands.proto\x12\x08\x63ommands\"\x84\x02\n\x07\x43ommand\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\x04\x12\x31\n\x0e\x63reate_auction\x18\n \x01(\x0b\x32\x17.commands.CreateAuctionH\x00\x12\'\n\tplace_bid\x18\x0b \x01(\x0b\x32\x12.commands.PlaceBidH\x00\x12/\n\rclose_auction\x18\x0c \x01(\x0b\x32\x16.commands.CloseAuctionH\x00\x12 \n\x05login\x18\r \x01(\x0b\x32\x0f.commands.LoginH\x00\x12\"\n\x06logout\x18\x0e \x01(\x0b\x32\x10.commands.LogoutH\x00\x42\x06\n\x04kind\"i\n\rCreateAuction\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0c\n\x04item\x18\x02 \x01(\t\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\r\n\x05owner\x18\x04 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x05 \x01(\t\"Q\n\x08PlaceBid\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0e\n\x06\x62idder\x18\x02 \x01(\t\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x03\x12\x11\n\tcurr_time\x18\x04 \x01(\x03\"5\n\x0c\x43loseAuction\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x11\n\tcurr_time\x18\x02 \x01(\x03\"(\n\x05Login\x12\r\n\x05token\x18\x01 \x01(\t\x12\x10\n\x08username\x18\x02 \x01(\t\"\x17\n\x06Logout\x12\r\n\x05token\x18\x01 \x01(\tb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x63ommands.proto\x12\x08\x63ommands\"\xfd\x03\n\x07\x43ommand\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\x04\x12\x31\n\x0e\x63reate_auction\x18\n \x01(\x0b\x32\x17.commands.CreateAuctionH\x00\x12\'\n\tplace_bid\x18\x0b \x01(\x0b\x32\x12.commands.PlaceBidH\x00\x12/\n\rclose_auction\x18\x0c \x01(\x0b\x32\x16.commands.CloseAuctionH\x00\x12 \n\x05login\x18\r \x01(\x0b\x32\x0f.commands.LoginH\x00\x12\"\n\x06logout\x18\x0e \x01(\x0b\x32\x10.commands.LogoutH\x00\x12+\n\x0bpay_auction\x18\x0f \x01(\x0b\x32\x14.commands.PayAuctionH\x00\x12\x31\n\x0erelease_escrow\x18\x10 \x01(\x0b\x32\x17.commands.ReleaseEscrowH\x00\x12/\n\rrefund_escrow\x18\x11 \x01(\x0b\x32\x16.commands.RefundEscrowH\x00\x12\x33\n\x0fset_description\x18\x12 \x01(\x0b\x32\x18.commands.SetDescriptionH\x00\x12\x31\n\x0erecord_summary\x18\x13 \x01(\x0b\x32\x17.commands.RecordSummaryH\x00\x42\x06\n\x04kind\"i\n\rCreateAuction\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0c\n\x04item\x18\x02 \x01(\t\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\r\n\x05owner\x18\x04 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x05 \x01(\t\"Q\n\x08PlaceBid\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0e\n\x06\x62idder\x18\x02 \x01(\t\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x03\x12\x11\n\tcurr_time\x18\x04 \x01(\x03\"5\n\x0c\x43loseAuction\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x11\n\tcurr_time\x18\x02 \x01(\x03\"(\n\x05Login\x12\r\n\x05token\x18\x01 \x01(\t\x12\x10\n\x08username\x18\x02 \x01(\t\"\x17\n\x06Logout\x12\r\n\x05token\x18\x01 \x01(\t\"T\n\nPayAuction\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\r\n\x05payer\x18\x02 \x01(\t\x12\x0e\n\x06\x61mount\x18\x03 \x01(\x03\x12\x13\n\x0bpayment_ref\x18\x04 \x01(\t\"J\n\rReleaseEscrow\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\r\n\x05\x61\x63tor\x18\x02 \x01(\t\x12\x16\n\x0esettlement_ref\x18\x03 \x01(\t\"I\n\x0cRefundEscrow\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\r\n\x05\x61\x63tor\x18\x02 \x01(\t\x12\x16\n\x0esettlement_ref\x18\x03 \x01(\t\"H\n\x0eSetDescription\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\r\n\x05\x61\x63tor\x18\x02 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\x03 \x01(\t\"4\n\rRecordSummary\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0f\n\x07summary\x18\x02 \x01(\tb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,15 +32,25 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'commands_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_COMMAND']._serialized_start=29
-  _globals['_COMMAND']._serialized_end=289
-  _globals['_CREATEAUCTION']._serialized_start=291
-  _globals['_CREATEAUCTION']._serialized_end=396
-  _globals['_PLACEBID']._serialized_start=398
-  _globals['_PLACEBID']._serialized_end=479
-  _globals['_CLOSEAUCTION']._serialized_start=481
-  _globals['_CLOSEAUCTION']._serialized_end=534
-  _globals['_LOGIN']._serialized_start=536
-  _globals['_LOGIN']._serialized_end=576
-  _globals['_LOGOUT']._serialized_start=578
-  _globals['_LOGOUT']._serialized_end=601
+  _globals['_COMMAND']._serialized_end=538
+  _globals['_CREATEAUCTION']._serialized_start=540
+  _globals['_CREATEAUCTION']._serialized_end=645
+  _globals['_PLACEBID']._serialized_start=647
+  _globals['_PLACEBID']._serialized_end=728
+  _globals['_CLOSEAUCTION']._serialized_start=730
+  _globals['_CLOSEAUCTION']._serialized_end=783
+  _globals['_LOGIN']._serialized_start=785
+  _globals['_LOGIN']._serialized_end=825
+  _globals['_LOGOUT']._serialized_start=827
+  _globals['_LOGOUT']._serialized_end=850
+  _globals['_PAYAUCTION']._serialized_start=852
+  _globals['_PAYAUCTION']._serialized_end=936
+  _globals['_RELEASEESCROW']._serialized_start=938
+  _globals['_RELEASEESCROW']._serialized_end=1012
+  _globals['_REFUNDESCROW']._serialized_start=1014
+  _globals['_REFUNDESCROW']._serialized_end=1087
+  _globals['_SETDESCRIPTION']._serialized_start=1089
+  _globals['_SETDESCRIPTION']._serialized_end=1161
+  _globals['_RECORDSUMMARY']._serialized_start=1163
+  _globals['_RECORDSUMMARY']._serialized_end=1215
 # @@protoc_insertion_point(module_scope)

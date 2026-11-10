@@ -63,6 +63,26 @@ def encode(command, client_id: str = "", seq: int = 0) -> bytes:
         msg.login.CopyFrom(commands_pb2.Login(token=c.token, username=c.username))
     elif isinstance(c, sessions.Logout):
         msg.logout.CopyFrom(commands_pb2.Logout(token=c.token))
+    elif isinstance(c, auction.PayAuction):
+        msg.pay_auction.CopyFrom(commands_pb2.PayAuction(
+            auction_id=c.auction_id, payer=c.payer, amount=c.amount, payment_ref=c.payment_ref,
+        ))
+    elif isinstance(c, auction.ReleaseEscrow):
+        msg.release_escrow.CopyFrom(commands_pb2.ReleaseEscrow(
+            auction_id=c.auction_id, actor=c.actor, settlement_ref=c.settlement_ref,
+        ))
+    elif isinstance(c, auction.RefundEscrow):
+        msg.refund_escrow.CopyFrom(commands_pb2.RefundEscrow(
+            auction_id=c.auction_id, actor=c.actor, settlement_ref=c.settlement_ref,
+        ))
+    elif isinstance(c, auction.SetDescription):
+        msg.set_description.CopyFrom(commands_pb2.SetDescription(
+            auction_id=c.auction_id, actor=c.actor, description=c.description,
+        ))
+    elif isinstance(c, auction.RecordSummary):
+        msg.record_summary.CopyFrom(commands_pb2.RecordSummary(
+            auction_id=c.auction_id, summary=c.summary,
+        ))
     else:
         raise TypeError(f"not a replicated command: {type(c).__name__}")
     return msg.SerializeToString()
@@ -98,6 +118,29 @@ def decode(data: bytes) -> Envelope:
         command = sessions.Login(token=msg.login.token, username=msg.login.username)
     elif kind == "logout":
         command = sessions.Logout(token=msg.logout.token)
+    elif kind == "pay_auction":
+        m = msg.pay_auction
+        command = auction.PayAuction(
+            auction_id=m.auction_id, payer=m.payer, amount=m.amount, payment_ref=m.payment_ref,
+        )
+    elif kind == "release_escrow":
+        m = msg.release_escrow
+        command = auction.ReleaseEscrow(
+            auction_id=m.auction_id, actor=m.actor, settlement_ref=m.settlement_ref,
+        )
+    elif kind == "refund_escrow":
+        m = msg.refund_escrow
+        command = auction.RefundEscrow(
+            auction_id=m.auction_id, actor=m.actor, settlement_ref=m.settlement_ref,
+        )
+    elif kind == "set_description":
+        m = msg.set_description
+        command = auction.SetDescription(
+            auction_id=m.auction_id, actor=m.actor, description=m.description,
+        )
+    elif kind == "record_summary":
+        m = msg.record_summary
+        command = auction.RecordSummary(auction_id=m.auction_id, summary=m.summary)
     else:
         # None: no command set (b"" decodes to this). Anything else: a
         # oneof member this version of the code does not know.

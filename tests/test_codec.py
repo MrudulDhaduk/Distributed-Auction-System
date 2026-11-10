@@ -14,7 +14,14 @@ import datetime
 
 import pytest
 
-from auction.state import CloseAuction, CreateAuction, PlaceBid
+from auction.state import (
+    CloseAuction,
+    CreateAuction,
+    PayAuction,
+    PlaceBid,
+    RefundEscrow,
+    ReleaseEscrow,
+)
 from replication import codec
 from sessions.state import Login, Logout
 
@@ -28,6 +35,10 @@ EVERY_COMMAND = [
     CloseAuction(auction_id=7, curr_time=T + datetime.timedelta(microseconds=1)),
     Login(token="tok-abc", username="mrudul"),
     Logout(token="tok-abc"),
+    PayAuction(auction_id=7, payer="karan", amount=150, payment_ref="PAY-ABC123"),
+    PayAuction(auction_id=7, payer="karan", amount=150, payment_ref=""),  # a doomed command, proposed on purpose
+    ReleaseEscrow(auction_id=7, actor="nisarg", settlement_ref="REL-ABC123"),
+    RefundEscrow(auction_id=7, actor="nisarg", settlement_ref="RFD-ABC123"),
 ]
 
 
@@ -93,3 +104,29 @@ def test_field_numbers_are_pinned():
 
     assert codec.decode(data) == codec.Envelope(Logout(token="t"), "c", 5)
     assert codec.encode(Logout(token="t"), client_id="c", seq=5) == data
+
+
+def test_escrow_field_numbers_are_pinned():
+    """The three escrow commands took fields 15, 16 and 17 of the oneof.
+    Written by hand (no client_id/seq: proto3 omits defaults):
+        PayAuction(1, "b", 2, "r"):
+            7a 0a                 field 15, length 10
+               08 01              auction_id = 1
+               12 01 62           payer = "b"
+               18 02              amount = 2
+               22 01 72           payment_ref = "r"
+        ReleaseEscrow(1, "s", "x"):
+            82 01 08              field 16 (tag needs two bytes), length 8
+               08 01 | 12 01 73 | 1a 01 78
+        RefundEscrow(1, "s", "x"): same with field 17 -> 8a 01
+    """
+    pay = bytes.fromhex("7a0a" "0801" "120162" "1802" "220172")
+    rel = bytes.fromhex("820108" "0801" "120173" "1a0178")
+    ref = bytes.fromhex("8a0108" "0801" "120173" "1a0178")
+
+    assert codec.encode(PayAuction(1, "b", 2, "r")) == pay
+    assert codec.encode(ReleaseEscrow(1, "s", "x")) == rel
+    assert codec.encode(RefundEscrow(1, "s", "x")) == ref
+    assert codec.decode(pay).command == PayAuction(1, "b", 2, "r")
+    assert codec.decode(rel).command == ReleaseEscrow(1, "s", "x")
+    assert codec.decode(ref).command == RefundEscrow(1, "s", "x")

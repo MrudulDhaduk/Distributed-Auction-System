@@ -33,6 +33,7 @@ nothing replicated; it is computed from the state, never stored in it.
 import hashlib
 import json
 
+from auction.state import escrow_of
 from common import time_conv
 
 
@@ -63,6 +64,13 @@ def _auction(auction_id, a: dict) -> dict:
         "closed_at": _micros(a["closed_at"]),
         "winner": None if a["winner"] is None else _bid(a["winner"]),
         "bids": [_bid(b) for b in a["bids"]],
+        # Replicated state like any other: two replicas that disagree about
+        # who holds the money must not hash alike. Always present (the NONE
+        # record for an unpaid auction), so the shape is the same everywhere.
+        "escrow": dict(escrow_of(a)),
+        # The ACCEPTED summaries, as a list: the checker verifies "at most one"
+        # and "only on a closed auction" from it. [] until the first one.
+        "summaries": list(a.get("summaries", [])),
     }
 
 

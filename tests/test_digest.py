@@ -14,7 +14,13 @@ import datetime
 import hashlib
 import json
 
-from auction.state import CloseAuction, CreateAuction, PlaceBid
+from auction.state import (
+    CloseAuction,
+    CreateAuction,
+    PayAuction,
+    PlaceBid,
+    ReleaseEscrow,
+)
 from replication import codec, digest
 from replication.state_machine import StateMachine
 from sessions.state import Login
@@ -139,3 +145,31 @@ def test_a_dedupe_hit_still_advances_the_index():
     sm = build(BASE)
     sm.apply_fn(9, codec.encode(BASE[3][2], client_id="a", seq=1))  # a retry
     assert sm.indexed_snapshot()[0] == 9
+
+
+# --- escrow is replicated state, so it is part of the digest (chunk 7) -------------------
+
+PAID = BASE + [("m", 1, PayAuction(auction_id=10, payer="mrudul", amount=150, payment_ref="PAY-1"))]
+RELEASED = PAID + [("s", 4, ReleaseEscrow(auction_id=10, actor="seller", settlement_ref="REL-1"))]
+
+
+def test_canonical_form_has_an_escrow_record_for_every_auction():
+    doc = json.loads(digest.canonical_json(build(PAID).snapshot()))
+    lamp, clock = doc["auctions"]
+    assert lamp["escrow"] == {"status": "NONE", "amount": 0, "payer": "", "payment_ref": "", "settlement_ref": ""}
+    assert clock["escrow"] == {
+        "status": "HELD", "amount": 150, "payer": "mrudul", "payment_ref": "PAY-1", "settlement_ref": "",
+    }
+
+
+def test_every_escrow_difference_changes_the_digest():
+    digests = {name: digest.state_digest(build(cmds).snapshot())
+               for name, cmds in {"unpaid": BASE, "held": PAID, "released": RELEASED}.items()}
+    other_ref = BASE + [("m", 1, PayAuction(auction_id=10, payer="mrudul", amount=150, payment_ref="PAY-2"))]
+    digests["other reference"] = digest.state_digest(build(other_ref).snapshot())
+
+    assert len(set(digests.values())) == 4, digests
+
+
+def test_the_same_escrow_commands_give_the_same_digest():
+    assert digest.state_digest(build(RELEASED).snapshot()) == digest.state_digest(build(RELEASED).snapshot())
