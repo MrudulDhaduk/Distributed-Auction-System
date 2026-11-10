@@ -163,12 +163,73 @@ def test_an_unknown_event_kind_is_skipped_not_fatal():
     assert snapshots[-1]["step"] == "ok"
 
 
-def test_markers_and_stops_come_from_steps_kills_elections_and_escrow():
+def test_markers_are_short_labels_in_event_order_with_the_full_text_as_tooltip():
     data = replay.build_data(fake_story(), "demo-x", "2026-01-01 12:00:00")
-    kinds = [m["kind"] for m in data["markers"]]
-    assert kinds == ["step", "kill", "election"]
+    assert [m["label"] for m in data["markers"]] == ["start", "kill n1", "leader n2", "pay #1", "close #1",
+                                                     "release #1", "checker"]
+    kill = next(m for m in data["markers"] if m["kind"] == "kill")
+    assert kill["text"] == "KILL -9 n1 (term 1)"
     assert data["stops"] == sorted(data["stops"]) and 2.5 in data["stops"] and 3.2 in data["stops"]
     assert not any(entry["cls"] == "action" and "bg" in entry["text"] for entry in data["log"])
+
+
+def test_an_escrow_marker_appears_only_when_the_status_changes():
+    events = [{"t": 0.1, "kind": "auction", "auction_id": 1, "item": "x", "close_time": 1, "description": ""},
+              {"t": 1.0, "kind": "escrow", "auction_id": 1, "status": "HELD", "amount": 5, "payer": "a",
+               "seller": "s", "payment_ref": "P", "settlement_ref": ""},
+              {"t": 2.0, "kind": "escrow", "auction_id": 1, "status": "HELD", "amount": 5, "payer": "a",
+               "seller": "s", "payment_ref": "P", "settlement_ref": ""},     # the same record read again
+              {"t": 3.0, "kind": "escrow", "auction_id": 1, "status": "RELEASED", "amount": 5, "payer": "a",
+               "seller": "s", "payment_ref": "P", "settlement_ref": "R"}]
+    data = replay.build_data(events, "demo-x", "2026-01-01 12:00:00")
+    assert [m["label"] for m in data["markers"]] == ["pay #1", "release #1"]
+
+
+def test_background_bids_move_the_auction_card_but_are_only_counted():
+    events = [
+        {"t": 0.1, "kind": "auction", "auction_id": 1, "item": "clock", "close_time": 1, "description": ""},
+        {"t": 0.2, "kind": "auction", "auction_id": 2, "item": "film camera", "close_time": 5, "description": "x"},
+        {"t": 0.3, "kind": "action", "user": "bg1", "op": "bid", "auction_id": 2, "amount": 40, "outcome": "ok",
+         "reason": "", "high_bid": 40, "high_bidder": "bg1", "background": True},
+        {"t": 0.4, "kind": "action", "user": "bg2", "op": "bid", "auction_id": 2, "amount": 90, "outcome": "rejected",
+         "reason": "not added", "high_bid": 90, "high_bidder": "bg2", "background": True},
+        {"t": 0.5, "kind": "action", "user": "bg3", "op": "bid", "auction_id": 2, "amount": 95, "outcome": "unknown",
+         "reason": "ClusterUnavailable", "high_bid": 0, "high_bidder": "", "background": True},
+    ]
+    _, snapshots = replay.build_snapshots(events)
+    final = snapshots[-1]
+    assert (final["auctions"]["2"]["high_bid"], final["auctions"]["2"]["high_bidder"]) == (90, "bg2")
+    assert final["bg"] == {"bids": 3, "accepted": 1, "rejected": 1, "errors": 1}
+    assert final["bids"] == []                       # the hero list does not show background bids
+    assert final["hero"] == "1"
+
+
+def test_a_close_logged_late_but_stamped_earlier_is_shown_at_its_real_time():
+    # The demo writes a close when it notices it, but stamps it with the scheduled close time.
+    events = [
+        {"t": 0.1, "kind": "auction", "auction_id": 2, "item": "x", "close_time": 1, "description": ""},
+        {"t": 3.0, "kind": "escrow", "auction_id": 2, "status": "HELD", "amount": 5, "payer": "bg1",
+         "seller": "s", "payment_ref": "P", "settlement_ref": ""},
+        {"t": 1.5, "kind": "close", "auction_id": 2, "winner": "bg1", "winning_bid": 5},   # later in the file
+    ]
+    data = replay.build_data(events, "demo-x", "2026-01-01 12:00:00")
+    assert [m["label"] for m in data["markers"]] == ["close #2", "pay #2"]
+    closed_at_2 = data["snapshots"][data["times"].index(1.5)]["auctions"]["2"]
+    assert closed_at_2["closed"] is True and closed_at_2["winner"] == "bg1"
+    assert data["snapshots"][0]["auctions"]["2"]["closed"] is False     # still open at the auction's creation
+
+
+def test_step_headings_get_short_labels_and_the_kill_step_is_not_marked():
+    assert replay.step_short_label("waiting 16 s for the closes") == "close wait"
+    assert replay.step_short_label("checker: every property, on what the clients saw") is None
+    assert replay.step_short_label("KILL -9 the leader n1 (term 1) mid-auction") is None
+    assert replay.step_short_label("restart n2: it replays its log from disk") == "restart n2"
+    assert replay.step_short_label("mrudul (the winner) pays 400 into ESCROW; tanmay refused") == "payment"
+    assert replay.step_short_label("nisarg creates auctions 2-4 right after the hero: background") == "create #2-4"
+    assert replay.step_short_label("nisarg creates auction 1, closing in 75 s") == "create #1"
+    assert replay.step_short_label("background bidders bg1-bg6 log in and bid on auctions 2-4") == "bidders on"
+    assert replay.step_short_label("waiting 16 s for the closes: auctions 2-4, then auction 1") == "close wait"
+    assert replay.step_short_label("something new here entirely") == "something new"
 
 
 # --- the HTML file --------------------------------------------------------------------
@@ -208,6 +269,3 @@ def test_a_broken_line_in_the_event_file_names_the_line(tmp_path):
         replay.build_replay(str(run))
 
 
-def test_marker_labels_are_short_and_cut_at_a_word():
-    assert replay.marker_label("KILL -9 the leader n1 (term 1) mid-auction") == "KILL -9 the leader n1..."
-    assert replay.marker_label("short") == "short"

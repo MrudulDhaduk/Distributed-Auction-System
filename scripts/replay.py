@@ -117,16 +117,17 @@ class ReplayState:
     def _action(self, e):
         if e.get("op") != "bid" or e.get("auction_id") is None:
             return
+        card = self._card(e["auction_id"])
+        if e["outcome"] in ("ok", "rejected") and e.get("high_bid") is not None:
+            # Only a real answer carries the high bid. "unknown" has none (the record holds 0).
+            # Background bids move the auction cards too; they are only not LISTED one by one.
+            card["high_bid"], card["high_bidder"] = e["high_bid"], e.get("high_bidder") or ""
         if e.get("background"):
             # Counted, never listed one by one. "unknown" = no answer came back.
             self.bg["bids"] += 1
             key = {"ok": "accepted", "rejected": "rejected"}.get(e["outcome"], "errors")
             self.bg[key] += 1
             return
-        card = self._card(e["auction_id"])
-        if e["outcome"] in ("ok", "rejected") and e.get("high_bid") is not None:
-            # Only a real answer carries the high bid. "unknown" has none (the record holds 0).
-            card["high_bid"], card["high_bidder"] = e["high_bid"], e.get("high_bidder") or ""
         if str(e["auction_id"]) == self.hero:
             self.bids.append({"t": self.t, "user": e["user"], "amount": e["amount"], "outcome": e["outcome"],
                               "reason": e.get("reason") or "", "high_bid": e.get("high_bid")})
@@ -178,23 +179,22 @@ class ReplayState:
         }
 
 
+def in_time_order(events: list) -> list:
+    """Events sorted by their "t". The sort is stable, so events with the same time keep
+    their order in the file. The file is not always in time order: a close is stamped
+    with the time it happened, which can be earlier than the moment it was logged."""
+    return sorted(events, key=lambda e: e.get("t", 0.0))
+
+
 def build_snapshots(events: list) -> tuple:
     """(initial, snapshots): snapshots[i] is the state after events[0..i]."""
     state = ReplayState()
     initial = state.view()
     snapshots = []
-    for e in events:
+    for e in in_time_order(events):
         state.apply(e)
         snapshots.append(state.view())
     return initial, snapshots
-
-
-def marker_label(text: str, limit: int = 26) -> str:
-    words = " ".join(str(text).split())
-    if len(words) <= limit:
-        return words
-    cut = words[:limit].rsplit(" ", 1)[0]
-    return (cut or words[:limit]) + "..."
 
 
 def describe(e: dict):
@@ -233,20 +233,104 @@ def describe(e: dict):
     return None
 
 
+# Step headings are long; the timeline shows a short name for each, found by the first rule
+# whose words appear in the heading. The full heading is the tooltip.
+# ORDER MATTERS: the first phrase found wins, so the more specific phrases come first
+# ("background bidders ... bid on auctions 2-4" must not read as "create #2-4").
+STEP_SHORT = (
+    ("starting LLM", "start"),
+    ("warm the model", "warm-up"),
+    ("background bidders", "bidders on"),
+    ("waiting", "close wait"),
+    ("auctions 2-4", "create #2-4"),
+    ("creates auction", "create #1"),
+    ("log in", "log in"),
+    ("bids: karan", "bids"),
+    ("both bid 200", "equal bids"),
+    ("asks the assistant", "assistant"),
+    ("keep bidding", "failover"),
+    ("more bids", "bids"),
+    ("summary workers", "summaries"),
+    ("shows the SAME escrow", "escrow read"),
+    ("background winners paid", "bg escrow"),
+    ("escrow of every auction", "escrow"),
+    ("price trends", "trends"),
+    ("checker", None),                 # the checker event is marked itself, as "checker"
+    ("background stall", "stall"),
+)
+
+
+def step_short_label(text: str):
+    """The short timeline label for a step heading, or None to leave it off the
+    timeline. A KILL step is not marked: the kill event itself is marked at the
+    same moment, as "kill n1"."""
+    words = " ".join(str(text).split())
+    if words.startswith("KILL -9"):
+        return None
+    if words.startswith("restart "):
+        return "restart " + words.split()[1].rstrip(":")
+    if "(the winner) pays" in words:
+        return "payment"
+    for phrase, short in STEP_SHORT:
+        if phrase in words:
+            return short
+    return " ".join(words.split()[:2])[:16]
+
+
+ESCROW_WORD = {"HELD": "pay", "RELEASED": "release", "REFUNDED": "refund"}
+
+
+def escrow_marker(e: dict):
+    word = ESCROW_WORD.get(e.get("status"))
+    if word is None:
+        return None
+    text = f"auction {e['auction_id']}: escrow {e['status']}, amount {e.get('amount')}, payer {e.get('payer') or '-'}"
+    return ("escrow", f"{word} #{e['auction_id']}", text)
+
+
+def event_marker(e: dict):
+    """(kind, short label, full text) for a kill, election, close or checker event."""
+    kind = e["kind"]
+    if kind == "kill":
+        return ("kill", f"kill {e['node']}", f"KILL -9 {e['node']} (term {e['term']})")
+    if kind == "election":
+        return ("election", f"leader {e['leader']}", f"new leader {e['leader']} (term {e['term']})")
+    if kind == "close":
+        return ("close", f"close #{e['auction_id']}",
+                f"auction {e['auction_id']} closed: winner {e.get('winner') or '-'} at {e.get('winning_bid')}")
+    if kind == "checker":
+        return ("checker", "checker",
+                "checker: ALL PROPERTIES PASS" if e.get("all_passed") else "checker: FAILED")
+    return None
+
+
 def build_data(events: list, run_name: str, recorded: str) -> dict:
+    events = in_time_order(events)
     initial, snapshots = build_snapshots(events)
     times = [e.get("t", 0.0) for e in events]
     log, markers, stops = [], [], []
+    escrow_last = {}
     for i, e in enumerate(events):
         described = describe(e)
         if described:
             cls, text = described
             log.append({"i": i, "t": e.get("t", 0.0), "cls": cls, "text": text})
-        if e.get("kind") in ("step", "kill", "election"):
-            label = {"step": lambda: marker_label(e["text"]),
-                     "kill": lambda: f"KILL {e['node']}",
-                     "election": lambda: f"leader {e['leader']}"}[e["kind"]]()
-            markers.append({"t": e.get("t", 0.0), "kind": e["kind"], "label": label})
+        marker = None
+        if e.get("kind") == "step":
+            short = step_short_label(e["text"])
+            if short is not None:
+                marker = ("step", short, e["text"])
+        elif e.get("kind") == "escrow":
+            aid = str(e["auction_id"])
+            previous = escrow_last.get(aid)
+            escrow_last[aid] = e["status"]
+            if previous != e["status"]:       # a repeated read of the same record is not a new marker
+                marker = escrow_marker(e)
+        elif e.get("kind") in ("kill", "election", "close", "checker"):
+            marker = event_marker(e)
+        if marker:
+            kind, short, full = marker
+            markers.append({"t": e.get("t", 0.0), "kind": kind, "label": short, "text": full})
         if e.get("kind") in ("step", "kill", "election", "escrow"):
             stops.append(e.get("t", 0.0))
     duration = max(times) + 1.0 if times else 1.0
@@ -412,12 +496,19 @@ button.active { border-color: var(--info); background: #0e2a44; color: #cfe6ff; 
 .mark.step { background: #8b949e; } .mark.step::after { background: #c9d1d9; }
 .mark.kill { background: var(--bad); width: 3px; } .mark.kill::after { background: var(--bad); }
 .mark.election { background: var(--warn); width: 3px; } .mark.election::after { background: var(--warn); }
+.mark.close { background: var(--info); } .mark.close::after { background: var(--info); }
+.mark.escrow { background: var(--ok); } .mark.escrow::after { background: var(--ok); }
+.mark.checker { background: var(--ok); width: 3px; } .mark.checker::after { background: var(--ok); }
+/* Two rows only: each marker's label goes on the first row where it does not run into the previous label. */
 .mark .label { position: absolute; left: 6px; white-space: nowrap; font-size: 14px; color: var(--muted); }
-.mark .label.r0 { top: 0; } .mark .label.r1 { top: 17px; } .mark .label.r2 { top: 34px; }
+.mark .label.r0 { top: 0; } .mark .label.r1 { top: 22px; }
 .mark .label.flip { left: auto; right: 6px; }
 .mark.step .label { color: #c9d1d9; }
 .mark.kill .label { color: #ffb4ad; font-weight: 700; }
 .mark.election .label { color: #ffe08a; font-weight: 700; }
+.mark.close .label { color: #a5d6ff; font-weight: 600; }
+.mark.escrow .label { color: #b7f5c4; font-weight: 600; }
+.mark.checker .label { color: #b7f5c4; font-weight: 800; }
 </style>
 </head>
 <body>
@@ -658,27 +749,25 @@ button.active { border-color: var(--info); background: #0e2a44; color: #cfe6ff; 
   }
 
   // ---- the timeline: markers for every step, kill and election --------------------
-  // Labels go in up to three rows. Each marker takes the first row where its label
-  // does not run into the previous label, so close markers (a kill and an election)
-  // do not print on top of each other. Estimate: 7.6 px per character at 14 px.
+  // Short labels on two rows. Each marker takes the first row where its label does
+  // not run into the previous label on that row; if neither row is free, the row that
+  // frees up first. The full text is the tooltip (title). Estimate: 7.6 px per
+  // character at 14 px.
   function buildMarkers() {
     var box = $("marks");
     var width = $("track").clientWidth || 1;
-    var rowEnd = [-1e9, -1e9, -1e9];
+    var rowEnd = [-1e9, -1e9];
     var html = "";
     D.markers.forEach(function (m) {
       var x = D.duration > 0 ? (m.t / D.duration) * width : 0;
       var labelWidth = m.label.length * 7.6 + 10;
       var row = -1;
       for (var r = 0; r < rowEnd.length; r++) { if (rowEnd[r] <= x) { row = r; break; } }
-      if (row < 0) {
-        row = 0;
-        for (var q = 1; q < rowEnd.length; q++) { if (rowEnd[q] < rowEnd[row]) { row = q; } }
-      }
+      if (row < 0) { row = rowEnd[0] <= rowEnd[1] ? 0 : 1; }
       rowEnd[row] = x + labelWidth;
       var flip = x + labelWidth > width;   // near the right edge: the label goes to the left of its marker
       html += '<div class="mark ' + m.kind + '" data-t="' + m.t + '" style="left:' + (x / width * 100) + '%" title="' +
-        esc(mmss(m.t) + "  " + m.label) + '"><span class="label r' + row + (flip ? " flip" : "") + '">' +
+        esc(mmss(m.t) + "  " + (m.text || m.label)) + '"><span class="label r' + row + (flip ? " flip" : "") + '">' +
         esc(m.label) + "</span></div>";
     });
     box.innerHTML = html;
