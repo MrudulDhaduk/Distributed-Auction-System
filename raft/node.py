@@ -166,6 +166,24 @@ class NodeStatus:
     last_log_term: int = 0
     commit_index: int = 0
     last_applied: int = 0
+    # Liveness telemetry for the dashboard (proto/status.proto). Local
+    # counters only: nothing here is Raft state, persisted or replicated.
+    heartbeats_received: int = 0
+    last_heartbeat_age: Optional[float] = None  # seconds; None = none yet
+    election_timer_left: float = 0.0            # seconds; 0 on a leader
+    heartbeats_sent: int = 0
+    peers: tuple = ()                           # of PeerTelemetry, leader only
+    heartbeat_interval: float = 0.0
+    election_timeout: tuple = (0.0, 0.0)
+
+
+@dataclasses.dataclass(frozen=True)
+class PeerTelemetry:
+    peer_id: str
+    replies: int
+    last_reply_age: Optional[float]  # seconds; None = none yet
+    match_index: int
+    next_index: int
 
 
 class RaftNode:
@@ -239,6 +257,16 @@ class RaftNode:
         self._ae_in_flight: set = set()  # peers with an unanswered AppendEntries
         self._pending: dict = {}  # log index -> Proposal; leader only
 
+        # Telemetry for status() (the dashboard). Observation only: no rule
+        # reads these. Received = AppendEntries accepted from the current
+        # term's leader; sent = heartbeat rounds; replies = per-peer
+        # AppendEntries replies in this leader's term.
+        self._hb_received = 0
+        self._hb_last_at: Optional[float] = None
+        self._hb_sent = 0
+        self._peer_replies: dict = {}
+        self._peer_reply_at: dict = {}
+
         # Read-index (section 8; see read_index). Leader only, reset in
         # _become_leader except the round counter, which only ever grows.
         self._term_start_index = 0  # index of this term's no-op
@@ -311,10 +339,31 @@ class RaftNode:
 
     def status(self) -> NodeStatus:
         with self._lock:
+            now = time.monotonic()
             last_index, last_term = self._last_log()
+            leader = self._role == Role.LEADER
+            peers = ()
+            if leader:
+                peers = tuple(
+                    PeerTelemetry(
+                        p,
+                        self._peer_replies.get(p, 0),
+                        None if p not in self._peer_reply_at else now - self._peer_reply_at[p],
+                        self._match_index.get(p, 0),
+                        self._next_index.get(p, 0),
+                    )
+                    for p in self._peers
+                )
             return NodeStatus(
                 self.node_id, self._current_term, self._role, self._voted_for, self._leader_id,
                 last_index, last_term, self._commit_index, self._last_applied,
+                heartbeats_received=self._hb_received,
+                last_heartbeat_age=None if self._hb_last_at is None else now - self._hb_last_at,
+                election_timer_left=0.0 if leader else max(0.0, self._election_deadline - now),
+                heartbeats_sent=self._hb_sent,
+                peers=peers,
+                heartbeat_interval=self._heartbeat_interval,
+                election_timeout=self._election_timeout,
             )
 
     def log_entries(self) -> tuple:
@@ -459,6 +508,7 @@ class RaftNode:
                 if now >= self._next_heartbeat:
                     self._next_heartbeat = now + self._heartbeat_interval
                     appends = self._prepare_appends(self._peers)
+                    self._hb_sent += 1
             elif now >= self._election_deadline:
                 # Figure 2, Followers (and Candidates): "If election timeout
                 # elapses without receiving AppendEntries RPC from current
@@ -562,6 +612,8 @@ class RaftNode:
         self._sent_round = {peer: 0 for peer in self._peers}
         self._acked_round = {peer: 0 for peer in self._peers}
         self._next_heartbeat = 0.0
+        self._peer_replies = {}  # telemetry: replies count per leadership term
+        self._peer_reply_at = {}
         # Section 8: "each leader commit a blank no-op entry into the log at
         # the start of its term". Until an entry of ITS term is committed, a
         # new leader cannot commit anything (the Figure 8 rule), not even
@@ -723,6 +775,8 @@ class RaftNode:
                     self._current_term, Role.FOLLOWER, f"AppendEntries from leader {args.from_id}"
                 )
             self._leader_id = args.from_id
+            self._hb_received += 1
+            self._hb_last_at = time.monotonic()
             # Followers: the timer is reset on "receiving AppendEntries RPC
             # from current leader" -- and only from a current-term leader,
             # which the term check above has established.
@@ -866,6 +920,8 @@ class RaftNode:
             return []
         if self._role != Role.LEADER or self._current_term != args.term:
             return []  # we were deposed (or re-elected) while it was in flight
+        self._peer_replies[peer] = self._peer_replies.get(peer, 0) + 1
+        self._peer_reply_at[peer] = time.monotonic()
 
         # Read-index (precaution two). Any reply in our term counts, success
         # or a consistency-check refusal: either way the peer still had our

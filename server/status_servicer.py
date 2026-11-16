@@ -32,6 +32,7 @@ every ~0.4 s. So:
     calls timed out.
 """
 
+import os
 import threading
 import time
 
@@ -39,6 +40,11 @@ from generated import status_pb2, status_pb2_grpc
 from replication import digest
 
 DEFAULT_MIN_INTERVAL = 0.5
+
+
+def _ms(seconds) -> int:
+    """Seconds -> whole milliseconds; None (never happened) -> -1."""
+    return -1 if seconds is None else int(seconds * 1000)
 
 
 class StatusServicer(status_pb2_grpc.StatusServiceServicer):
@@ -87,6 +93,21 @@ class StatusServicer(status_pb2_grpc.StatusServiceServicer):
             last_log_term=s.last_log_term,
             state_digest=state_digest,
             digest_index=index,
+            heartbeats_received=getattr(s, "heartbeats_received", 0),
+            last_heartbeat_age_ms=_ms(getattr(s, "last_heartbeat_age", None)),
+            election_timer_left_ms=int(getattr(s, "election_timer_left", 0.0) * 1000),
+            heartbeats_sent=getattr(s, "heartbeats_sent", 0),
+            peers=[
+                status_pb2.PeerReplication(
+                    peer_id=p.peer_id, replies=p.replies, last_reply_age_ms=_ms(p.last_reply_age),
+                    match_index=p.match_index, next_index=p.next_index,
+                )
+                for p in getattr(s, "peers", ())
+            ],
+            heartbeat_interval_ms=int(getattr(s, "heartbeat_interval", 0.0) * 1000),
+            election_timeout_min_ms=int(getattr(s, "election_timeout", (0.0, 0.0))[0] * 1000),
+            election_timeout_max_ms=int(getattr(s, "election_timeout", (0.0, 0.0))[1] * 1000),
+            pid=os.getpid(),
         )
 
     def DumpState(self, request, context):
