@@ -33,12 +33,16 @@ def test_status_and_dump_over_the_peer_port(grpc_cluster):  # noqa: F811
     c.boot("n3")
     assert wait_until(lambda: c.leader() is not None, 10)
     seller = ClusterClient([c.client_addr(n) for n in IDS])
+    bidder = ClusterClient([c.client_addr(n) for n in IDS])
     stubs = {nid: status_stub(c, nid) for nid in IDS}
     try:
         assert seller.login("nisarg", "pass").result.success
         close = time_conv.dt_to_micros(time_conv.now_utc() + datetime.timedelta(hours=1))
         assert seller.create_auction(1, "clock", close).result.success
-        assert seller.place_bid(1, 100).result.success
+        # A seller cannot bid on their own auction (auction/state.py
+        # bid_rejection): the bid comes from a second user.
+        assert bidder.login("karan", "pass").result.success
+        assert bidder.place_bid(1, 100).result.success
 
         def statuses():
             return {nid: stub.GetNodeStatus(status_pb2.NodeStatusRequest(include_digest=True), timeout=2)
@@ -63,10 +67,11 @@ def test_status_and_dump_over_the_peer_port(grpc_cluster):  # noqa: F811
         assert dump.state_digest == st["n2"].state_digest
         assert dump.digest_index == st["n2"].digest_index
         doc = json.loads(dump.state_json)
-        assert [(b["bidder"], b["amount"]) for b in doc["auctions"][0]["bids"]] == [("nisarg", 100)]
+        assert [(b["bidder"], b["amount"]) for b in doc["auctions"][0]["bids"]] == [("karan", 100)]
         assert seller.token not in dump.state_json
     finally:
         seller.close()
+        bidder.close()
         for channel, _ in stubs.values():
             channel.close()
 

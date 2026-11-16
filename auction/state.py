@@ -210,6 +210,43 @@ def summary_rejection(auction, summary=None):
     return None
 
 
+ITEM_MAX_CHARS = 100
+
+
+def create_rejection(auction_id: int, item: str, owner: str):
+    """Why this CreateAuction may not be applied (apart from a duplicate id,
+    which needs the table), or None if it may. Deterministic: no clock. The
+    close time is checked against the clock by the handler, before
+    proposing (server/auction_servicer.py), because apply() has no "now"
+    for a create."""
+    if auction_id <= 0:
+        return f"Auction ID must be a positive whole number, not {auction_id}"
+    if not item or not item.strip():
+        return "The item name must not be empty"
+    if item != item.strip():
+        return "The item name must not start or end with spaces"
+    if len(item) > ITEM_MAX_CHARS:
+        return f"The item name is {len(item)} characters long; the limit is {ITEM_MAX_CHARS}"
+    if not owner:
+        return "An auction needs a seller"
+    return None
+
+
+def bid_rejection(auction, bidder: str, amount: int):
+    """Why `bidder` may not bid `amount` on this auction regardless of the
+    clock and the other bids, or None. The seller rule lives here, in the
+    replicated state machine, so it holds whatever client sends the bid --
+    the dashboard greys the button out, but this is what actually refuses."""
+    if bidder == auction["owner"]:
+        return (
+            f"{bidder} is the seller of this auction: "
+            "a seller cannot bid on their own auction"
+        )
+    if amount <= 0:
+        return f"Bid amount must be a positive whole number, not {amount}"
+    return None
+
+
 def summary_of(auction: dict) -> str:
     """The auction's summary text, or "" if it has none. The state keeps the
     ACCEPTED summaries as a list (created by the first RecordSummary) so a
@@ -242,6 +279,9 @@ class AuctionState:
                     return Result(
                         success=False, reason="ID already exists, choose a different ID"
                     )
+                reason = create_rejection(command.auction_id, command.item, command.owner)
+                if reason is not None:
+                    return Result(success=False, reason=reason)
 
                 self.auctions[command.auction_id] = {
                     "item": command.item,
@@ -262,6 +302,9 @@ class AuctionState:
                         success=False,
                         reason="Auction ID does not exist, please check the ID again",
                     )
+                reason = bid_rejection(auction, command.bidder, command.amount)
+                if reason is not None:
+                    return Result(success=False, reason=reason)
 
                 if auction["closed"]:
                     return Result(success=False, reason=f"Auction is already closed {command.bidder}")

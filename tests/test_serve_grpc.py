@@ -152,7 +152,13 @@ def test_three_nodes_over_grpc_redirect_then_replicate(grpc_cluster):
             auction_pb2.CreateAuctionRequest(auction_id=1, item="clock", close_time=close),
             metadata=md, timeout=5)
         assert created.result.success
-        bid = auction.PlaceBid(auction_pb2.PlaceBidRequest(auction_id=1, amount=150), metadata=md, timeout=5)
+        # The seller's own bid is refused by apply() on every replica...
+        own = auction.PlaceBid(auction_pb2.PlaceBidRequest(auction_id=1, amount=150), metadata=md, timeout=5)
+        assert not own.result.success and "seller cannot bid" in own.result.reason
+        # ...and another user's bid goes through.
+        bidder = auth.Login(auction_pb2.LoginRequest(username="karan", password="pass"), timeout=5).token
+        bid = auction.PlaceBid(auction_pb2.PlaceBidRequest(auction_id=1, amount=150),
+                               metadata=[(TOKEN_METADATA_KEY, bidder)], timeout=5)
         assert bid.result.success and bid.current_high_bid == 150
     finally:
         channel.close()

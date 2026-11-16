@@ -15,6 +15,12 @@ import pytest
 from auction.state import AuctionState
 from generated import auction_pb2
 from server.auction_servicer import AuctionServicer
+from common import time_conv
+import datetime
+
+# The handler refuses a close time that is not in the future (before the
+# LLM call), so every create here closes an hour from now.
+FUTURE = time_conv.dt_to_micros(time_conv.now_utc() + datetime.timedelta(hours=1))
 
 
 class FakeLLMClient:
@@ -52,7 +58,7 @@ def servicer(llm):
 
 def test_no_attributes_skips_llm_call_and_creates_with_empty_description(servicer, llm):
     response = servicer.CreateAuction(
-        auction_pb2.CreateAuctionRequest(auction_id=1, item="vintage clock", close_time=0),
+        auction_pb2.CreateAuctionRequest(auction_id=1, item="vintage clock", close_time=FUTURE),
         context=CTX,
     )
 
@@ -64,7 +70,7 @@ def test_no_attributes_skips_llm_call_and_creates_with_empty_description(service
 
 def test_owner_comes_from_context_and_is_named_in_the_result(servicer, llm):
     response = servicer.CreateAuction(
-        auction_pb2.CreateAuctionRequest(auction_id=1, item="vintage clock", close_time=0),
+        auction_pb2.CreateAuctionRequest(auction_id=1, item="vintage clock", close_time=FUTURE),
         context=CTX,
     )
 
@@ -74,7 +80,7 @@ def test_owner_comes_from_context_and_is_named_in_the_result(servicer, llm):
 
 def test_attributes_present_calls_llm_and_stores_returned_description(servicer, llm):
     request = auction_pb2.CreateAuctionRequest(
-        auction_id=1, item="1987 Fender Stratocaster", close_time=0,
+        auction_id=1, item="1987 Fender Stratocaster", close_time=FUTURE,
         attributes={"condition": "mint"},
     )
     response = servicer.CreateAuction(request, context=CTX)
@@ -91,7 +97,7 @@ def test_attributes_present_calls_llm_and_stores_returned_description(servicer, 
 def test_llm_outage_degrades_to_empty_description_auction_still_created(servicer, llm):
     llm.error = grpc.RpcError()
     request = auction_pb2.CreateAuctionRequest(
-        auction_id=1, item="1987 Fender Stratocaster", close_time=0,
+        auction_id=1, item="1987 Fender Stratocaster", close_time=FUTURE,
         attributes={"condition": "mint"},
     )
 
@@ -104,7 +110,7 @@ def test_llm_outage_degrades_to_empty_description_auction_still_created(servicer
 
 def test_get_auction_returns_stored_description(servicer, llm):
     request = auction_pb2.CreateAuctionRequest(
-        auction_id=1, item="1987 Fender Stratocaster", close_time=0,
+        auction_id=1, item="1987 Fender Stratocaster", close_time=FUTURE,
         attributes={"condition": "mint"},
     )
     servicer.CreateAuction(request, context=CTX)

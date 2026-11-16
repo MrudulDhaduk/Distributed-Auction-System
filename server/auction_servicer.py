@@ -30,6 +30,7 @@ apply() never hears about the LLM call. The leader check comes BEFORE the
 LLM call, so a follower never calls the model.
 """
 
+import datetime
 import logging
 import uuid
 
@@ -45,6 +46,36 @@ from server.errors import raft_errors
 from server.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+# How long an auction may run. The close time is the one CreateAuction
+# field apply() cannot check (it has no clock for a create), so the handler
+# checks it against the leader's clock before proposing.
+MAX_AUCTION_DURATION = datetime.timedelta(days=30)
+
+ATTRIBUTES_MAX = 8
+ATTRIBUTE_KEY_MAX = 30
+ATTRIBUTE_VALUE_MAX = 100
+
+
+def close_time_rejection(close_time, now):
+    if close_time <= now:
+        return "The close time must be in the future"
+    if close_time - now > MAX_AUCTION_DURATION:
+        return f"An auction can run for at most {MAX_AUCTION_DURATION.days} days"
+    return None
+
+
+def attributes_rejection(attributes) -> str | None:
+    """Seller-supplied attributes feed the LLM prompt: bound them."""
+    if len(attributes) > ATTRIBUTES_MAX:
+        return f"At most {ATTRIBUTES_MAX} attributes"
+    for key, value in attributes.items():
+        if not key.strip() or not value.strip():
+            return "Attribute names and values must not be empty"
+        if len(key) > ATTRIBUTE_KEY_MAX or len(value) > ATTRIBUTE_VALUE_MAX:
+            return f"Attribute names are at most {ATTRIBUTE_KEY_MAX} characters and values at most {ATTRIBUTE_VALUE_MAX}"
+    return None
 
 
 def _to_pb_result(result: commands.Result) -> auction_pb2.Result:
@@ -113,6 +144,19 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
         with raft_errors(context):
             self._replicator.check_leader()
             close_time = time_conv.micros_to_dt(request.close_time)
+            # Validate before the LLM call: a create that apply() would
+            # refuse must not cost seconds of model time. The id/item/owner
+            # rule is apply()'s own function, so the two cannot drift.
+            reason = (
+                commands.create_rejection(request.auction_id, request.item, context.username)
+                or close_time_rejection(close_time, time_conv.now_utc())
+                or attributes_rejection(request.attributes)
+            )
+            if reason is not None:
+                return auction_pb2.CreateAuctionResponse(
+                    result=auction_pb2.Result(success=False, reason=reason),
+                    auction_id=request.auction_id,
+                )
             description = self._describe(request)
             command = commands.CreateAuction(
                 auction_id=request.auction_id,
@@ -179,6 +223,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
             auction = self._state.auctions.get(request.auction_id)
             if auction is not None:
                 item = auction["item"]
+                owner = auction["owner"]
                 close_time = auction["close_time"]
                 description = auction["description"]
                 closed = auction["closed"]
@@ -216,6 +261,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
             winner=winner.bidder if winner is not None else "",
             description=description,
             summary=summary,
+            owner=owner,
         )
         return auction_pb2.GetAuctionResponse(
             result=auction_pb2.Result(success=True, reason="ok"),
@@ -249,6 +295,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
                         close_time=time_conv.dt_to_micros(auction["close_time"]),
                         closed=auction["closed"],
                         current_high_bid=high_bid,
+                        owner=auction["owner"],
                     )
                 )
 

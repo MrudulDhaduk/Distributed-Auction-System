@@ -72,6 +72,9 @@ _TIME_UP = re.compile(r"^Time is up ")
 _NO_AUCTION = re.compile(r"^Auction ID does not exist")
 _STALE = re.compile(r"^stale request")
 _DUP_ID = re.compile(r"^ID already exists")
+# auction/state.py bid_rejection: the seller's own bid, a non-positive amount.
+_OWN_AUCTION = re.compile(r"^(\S+) is the seller of this auction: a seller cannot bid on their own auction$")
+_NOT_POSITIVE = re.compile(r"^Bid amount must be a positive whole number, not (-?\d+)$")
 
 # The reasons apply() gives for a refused payment or settlement
 # (auction/state.py payment_rejection / settlement_rejection). Anything else
@@ -312,6 +315,8 @@ def check_rejections(history, states) -> PropertyResult:
       "...highest bid is H"    H >= the amount, and a bid of exactly H exists;
       "already closed"         the auction is closed;
       "Time is up"             close_time is before the call returned;
+      "is the seller"          the bidder is the auction's owner;
+      "positive whole number"  the amount is <= 0;
       "stale request"          never: the workload rule forbids it;
       create "ID already exists": the auction exists.
     A rejected bid that IS in the state is the signature of a dedupe
@@ -353,6 +358,13 @@ def check_rejections(history, states) -> PropertyResult:
         elif _TIME_UP.match(reason):
             if a is None or a["close_time"] >= r["end"]:
                 violations.append(f"{who}: bid refused as 'Time is up' but close_time is not before the reply")
+        elif m := _OWN_AUCTION.match(reason):
+            if m.group(1) != r["user"] or a is None or a["owner"] != r["user"]:
+                violations.append(f"{who}: bid refused as the seller's own, but {r['user']} "
+                                  f"is not the seller of auction {r['auction_id']}")
+        elif m := _NOT_POSITIVE.match(reason):
+            if int(m.group(1)) != r["amount"] or r["amount"] > 0:
+                violations.append(f"{who}: {reason!r} does not fit amount {r['amount']}")
         elif _NO_AUCTION.match(reason):
             pass  # it may have been created later; absence of the bid is checked above
         else:
