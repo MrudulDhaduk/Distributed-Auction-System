@@ -31,6 +31,7 @@ from server.errors import raft_errors
 
 EXEMPT_METHODS = frozenset({
     "/auction.AuthService/Login",
+    "/auction.AuthService/Register",
 })
 
 

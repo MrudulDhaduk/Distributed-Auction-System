@@ -88,6 +88,13 @@ def canonical(snapshot: dict) -> dict:
     return {
         "auctions": [_auction(aid, a) for aid, a in sorted(snapshot["auctions"].items())],
         "sessions": sorted([hash_token(tok), user] for tok, user in snapshot["sessions"].items()),
+        # Registered accounts: the name, and a short hash of the stored
+        # password hash (enough to tell two tables apart; the dump travels
+        # with no auth, so neither salt nor hash appears in it).
+        "users": sorted(
+            [name, hash_token(salt + ":" + pw_hash)]
+            for name, (salt, pw_hash) in snapshot.get("users", {}).items()
+        ),
         "dedupe": [
             [cid, seq, _response(applied)]
             for cid, (seq, applied) in sorted(snapshot["dedupe"].items())

@@ -231,6 +231,11 @@ class ClusterClient:
             self.token = response.token
         return response
 
+    def register(self, username, password) -> auction_pb2.RegisterResponse:
+        """Create an account (no token needed). Does not log in."""
+        return self._call("AuthService", "Register", auction_pb2.RegisterRequest(
+            username=username, password=password, client_id=self.client_id, seq=self._next_seq()))
+
     def logout(self) -> auction_pb2.LogoutResponse:
         response = self._call("AuthService", "Logout", auction_pb2.LogoutRequest(
             client_id=self.client_id, seq=self._next_seq()))

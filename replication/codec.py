@@ -63,6 +63,10 @@ def encode(command, client_id: str = "", seq: int = 0) -> bytes:
         msg.login.CopyFrom(commands_pb2.Login(token=c.token, username=c.username))
     elif isinstance(c, sessions.Logout):
         msg.logout.CopyFrom(commands_pb2.Logout(token=c.token))
+    elif isinstance(c, sessions.RegisterUser):
+        msg.register_user.CopyFrom(commands_pb2.RegisterUser(
+            username=c.username, salt=c.salt, password_hash=c.password_hash,
+        ))
     elif isinstance(c, auction.PayAuction):
         msg.pay_auction.CopyFrom(commands_pb2.PayAuction(
             auction_id=c.auction_id, payer=c.payer, amount=c.amount, payment_ref=c.payment_ref,
@@ -118,6 +122,9 @@ def decode(data: bytes) -> Envelope:
         command = sessions.Login(token=msg.login.token, username=msg.login.username)
     elif kind == "logout":
         command = sessions.Logout(token=msg.logout.token)
+    elif kind == "register_user":
+        m = msg.register_user
+        command = sessions.RegisterUser(username=m.username, salt=m.salt, password_hash=m.password_hash)
     elif kind == "pay_auction":
         m = msg.pay_auction
         command = auction.PayAuction(

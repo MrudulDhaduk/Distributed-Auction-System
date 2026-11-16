@@ -41,7 +41,7 @@ from dataclasses import dataclass
 
 from auction.state import AuctionState, PlaceBid, Result
 from replication import codec
-from sessions.state import Login, Logout, SessionState
+from sessions.state import Login, Logout, RegisterUser, SessionState
 
 log = logging.getLogger("replication.state_machine")
 
@@ -68,7 +68,7 @@ class Applied:
     token: str = ""
 
 
-_SESSION_COMMANDS = (Login, Logout)
+_SESSION_COMMANDS = (Login, Logout, RegisterUser)
 
 
 class StateMachine:
@@ -172,5 +172,6 @@ class StateMachine:
             return self._last_index, {
                 "auctions": auctions,
                 "sessions": self.sessions.snapshot(),
+                "users": self.sessions.users_snapshot(),
                 "dedupe": dict(self._dedupe),
             }

@@ -41,7 +41,8 @@ from typing import Optional
 
 from replication.replicator import LocalReplicator
 from replication.state_machine import StateMachine
-from sessions.state import Login, Logout, SessionState
+from sessions.state import Login, Logout, RegisterUser, SessionState
+from sessions import users
 
 # secrets, not random: `random` is a deterministic PRNG meant to be seeded
 # and reproduced -- exactly the property an auth token must NOT have. secrets
@@ -74,6 +75,31 @@ class SessionStore:
         """Return the username for token, or None if it names no session
         on this node, as of what this node has applied."""
         return self._state.validate(token)
+
+    # --- accounts ---------------------------------------------------------------
+
+    def check_password(self, username: str, password: str) -> bool:
+        """Against THIS node's applied accounts. A miss on a follower may only
+        mean a RegisterUser has not arrived yet: see AuthServicer.Login."""
+        return self._state.check_password(username, password)
+
+    def user_exists(self, username: str) -> bool:
+        return self._state.user_exists(username)
+
+    def check_leader(self) -> None:
+        self._replicator.check_leader()
+
+    def read_barrier(self) -> None:
+        self._replicator.read_barrier()
+
+    def register(self, username: str, password: str, client_id: str = "", seq: int = 0):
+        """Hash the password HERE, on the leader, with a fresh random salt,
+        and replicate RegisterUser(username, salt, hash). Returns the applied
+        Result. The caller has validated the password; apply() checks the
+        username rule and uniqueness again, for real."""
+        salt = users.new_salt()
+        command = RegisterUser(username=username, salt=salt, password_hash=users.hash_password(password, salt))
+        return self._replicator.submit(command, client_id, seq).result
 
     def destroy(self, token: str, client_id: str = "", seq: int = 0) -> None:
         """Replicate Logout(token). Destroying an unknown or
