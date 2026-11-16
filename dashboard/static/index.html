@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auction Cluster Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div>
+      <div class="brand-title">Auction cluster</div>
+      <div class="brand-sub">3 nodes, Raft</div>
+    </div>
+  </div>
+  <div class="pills">
+    <span class="pill" id="pill-leader">leader: —</span>
+    <span class="pill" id="pill-term">term —</span>
+    <span class="pill" id="pill-sync">replicas —</span>
+    <span class="pill" id="pill-llm">LLM —</span>
+    <span class="pill pill-dim" id="pill-conn">connecting…</span>
+  </div>
+  <div class="me" id="me-box"></div>
+</header>
+
+<main class="layout">
+  <section class="col-main">
+    <div class="card" id="cluster-card">
+      <div class="card-head">
+        <h2>Cluster</h2>
+        <span class="hint">Dots: heartbeats from the leader. Ring: election timer.</span>
+      </div>
+      <div class="cluster-wrap">
+        <svg id="topology" viewBox="0 0 640 390" role="img" aria-label="Cluster topology"></svg>
+        <div class="quorum" id="quorum"></div>
+      </div>
+      <div class="nodes" id="nodes"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Auctions</h2>
+        <div class="filters" id="filters">
+          <button class="chip active" data-filter="all">All</button>
+          <button class="chip" data-filter="open">Open</button>
+          <button class="chip" data-filter="closed">Closed</button>
+          <button class="chip" data-filter="mine">Mine</button>
+        </div>
+      </div>
+      <div class="auctions" id="auctions"><div class="empty">No auctions yet.</div></div>
+    </div>
+  </section>
+
+  <aside class="col-side">
+    <div class="card" id="account-card"></div>
+
+    <div class="card">
+      <div class="card-head"><h2>New auction</h2></div>
+      <form id="create-form" class="form" autocomplete="off" novalidate>
+        <label>Item
+          <input name="item" maxlength="100" placeholder="e.g. vintage camera" required>
+          <span class="field-err" data-for="item"></span>
+        </label>
+        <label>Runs for
+          <select name="duration">
+            <option value="30">30 seconds</option>
+            <option value="60" selected>1 minute</option>
+            <option value="120">2 minutes</option>
+            <option value="300">5 minutes</option>
+            <option value="900">15 minutes</option>
+            <option value="3600">1 hour</option>
+            <option value="custom">custom…</option>
+          </select>
+        </label>
+        <label class="custom-duration" hidden>Seconds (15 – 2,592,000)
+          <input name="seconds" type="number" min="15" max="2592000" step="1" value="90">
+          <span class="field-err" data-for="duration_seconds"></span>
+        </label>
+        <div class="attrs">
+          <div class="attrs-head">Attributes <span class="hint">(optional, used for the description)</span></div>
+          <div id="attr-rows"></div>
+          <button type="button" class="link" id="attr-add">+ add attribute</button>
+          <span class="field-err" data-for="attributes"></span>
+        </div>
+        <button class="btn primary" type="submit" id="create-btn">Create auction</button>
+        <div class="form-note" id="create-note"></div>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Users</h2><span class="hint" id="user-count"></span></div>
+      <div class="users" id="users"></div>
+    </div>
+
+    <div class="card events-card">
+      <div class="card-head"><h2>Events</h2></div>
+      <ol class="events" id="events"></ol>
+    </div>
+  </aside>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
