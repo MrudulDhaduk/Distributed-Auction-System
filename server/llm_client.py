@@ -65,6 +65,8 @@ def _to_auction_context(auction: dict) -> llm_pb2.AuctionContext:
         closed=auction["closed"],
         current_high_bid=auction["current_high_bid"],
         bid_count=auction["bid_count"],
+        seller=auction.get("seller", ""),
+        current_high_bidder=auction.get("current_high_bidder", ""),
     )
 
 
@@ -104,6 +106,8 @@ class LLMClient:
             )
             if "auction" in context:
                 request.auction.CopyFrom(_to_auction_context(context["auction"]))
+            if context.get("asker"):
+                request.asker = context["asker"]
             response = self._stub.AnswerBiddingQuestion(request, timeout=self._deadline)
 
         elif "attributes" in context:

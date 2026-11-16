@@ -53,7 +53,8 @@ log = logging.getLogger(__name__)
 # Every rule in _FAQ_SYSTEM below is one apply() actually enforces
 # (auction/state.py): whole numbers from `amount: int`, strictly-higher from
 # `amount <= highest_bid` being a rejection, the close check from
-# `curr_time > close_time`, the winner from `max(bids, key=bid_amount)`.
+# `curr_time > close_time`, the winner from `max(bids, key=bid_amount)`,
+# the seller rule and positive amounts from bid_rejection().
 # If apply()'s rules change, this block is wrong until it changes too -- it
 # is documentation of the state machine that happens to be aimed at a model.
 #
@@ -73,7 +74,8 @@ you can help with.
 
 These are this site's bidding rules, and they are the complete set:
 
-  - Bids are whole numbers.
+  - Bids are positive whole numbers.
+  - The seller of an auction cannot bid on their own auction.
   - A bid must be strictly higher than the current high bid. There is no
     minimum increment: one more than the current high is a valid bid.
   - No bids are accepted after the auction's close time.
@@ -197,6 +199,8 @@ def _render_auction(auction: llm_pb2.AuctionContext) -> str:
             f"  current high bid: {auction.current_high_bid}",
             f"  bids so far:      {auction.bid_count}",
         ]
+        + ([f"  seller:           {auction.seller}"] if auction.seller else [])
+        + ([f"  high bidder:      {auction.current_high_bidder}"] if auction.current_high_bidder else [])
     )
 
 
@@ -215,6 +219,18 @@ def build_faq_messages(request: llm_pb2.BiddingQuestionRequest) -> list[dict]:
             "authoritative -- prefer them over anything you think you know:\n"
             + _render_auction(request.auction)
         )
+        # The asker's name comes from the validated token on the node, not
+        # from the caller's text, and a username is [a-z0-9_] only.
+        if request.asker:
+            is_seller = request.asker == request.auction.seller
+            leads = request.asker == request.auction.current_high_bidder
+            system += (
+                f"\n\nThe person asking is {request.asker}"
+                + (", the SELLER of this auction: they cannot bid on it." if is_seller
+                   else ", a bidder (not the seller).")
+                + (" They hold the current high bid." if leads
+                   else "" if is_seller else " They do not hold the current high bid.")
+            )
     # request.question is untrusted and goes in the user turn VERBATIM.
     return [
         {"role": "system", "content": system},

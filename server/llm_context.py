@@ -20,6 +20,7 @@ def auction_context(auction_id: int, auction: dict) -> dict:
     nothing else. `closed` is the stored flag set by an applied CloseAuction,
     never recomputed from a clock (correctness property 4)."""
     bids = auction["bids"]
+    top = max(bids, key=lambda b: b.bid_amount) if bids else None
     return {
         "auction_id": auction_id,
         "item": auction["item"],
@@ -27,6 +28,8 @@ def auction_context(auction_id: int, auction: dict) -> dict:
         "closed": auction["closed"],
         "current_high_bid": max((b.bid_amount for b in bids), default=0),
         "bid_count": len(bids),
+        "seller": auction["owner"],
+        "current_high_bidder": top.bidder if top is not None else "",
     }
 
 

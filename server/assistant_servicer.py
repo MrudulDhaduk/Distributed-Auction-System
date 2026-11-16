@@ -88,7 +88,12 @@ class AssistantServicer(assistant_pb2_grpc.AssistantServiceServicer):
                 auction = self._state.auctions.get(request.auction_id)
                 if auction is None:
                     return assistant_pb2.AnswerResponse(result=_no("no such auction"))
-                llm_ctx = {"auction": llm_context.auction_context(request.auction_id, auction)}
+                llm_ctx = {
+                    "auction": llm_context.auction_context(request.auction_id, auction),
+                    # Who asks, from the token: the model answers the seller
+                    # differently ("you cannot bid on your own auction").
+                    "asker": getattr(context, "username", "") or "",
+                }
 
         request_id, answer, failure = self._ask_model(request.question, llm_ctx)
         if failure is not None:

@@ -79,7 +79,8 @@ def test_the_model_gets_the_closed_auction_and_its_bid_history_in_order(cluster)
     assert query == ""
     assert context["auction"] == {
         "auction_id": 1, "item": "vintage clock", "close_time": context["auction"]["close_time"],
-        "closed": True, "current_high_bid": 150, "bid_count": 2,
+        "closed": True, "current_high_bid": 150, "bid_count": 2, "seller": "nisarg",
+        "current_high_bidder": "mrudul",
     }
     assert [(b["bidder"], b["amount"]) for b in context["bid_history"]] == [("karan", 100), ("mrudul", 150)]
     assert all(isinstance(b["time"], int) for b in context["bid_history"])  # epoch micros
