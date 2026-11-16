@@ -13,6 +13,11 @@ Built for CS G623 (Advanced Operating Systems). It ships with a seeded chaos
 harness and a property checker that tests the guarantees on real processes.
 Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirements-audit.md).
 
+**Want to see it working?** Run `.venv\Scripts\python.exe -m dashboard --open` and follow
+[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard): a
+browser dashboard that starts the cluster, shows every replica and its heartbeats live,
+and lets you kill nodes, create users and auctions, bid, and ask each auction's assistant.
+
 **Who wrote what.** The M1 code (`auction/state.py`'s `apply()` and commands,
 gRPC, auth and sessions, the closer, the LLM server) was written by the author.
 Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`). The M2 code (Raft,
@@ -29,7 +34,8 @@ flowchart LR
     subgraph Clients
         C1[ClusterClient<br/>client/auction_client.py]
         H[chaos harness / demo<br/>scripts/chaos.py, demo.py]
-        D[dashboard<br/>scripts/dashboard.py]
+        D[terminal dashboard<br/>scripts/dashboard.py]
+        W[web dashboard<br/>python -m dashboard<br/>http://127.0.0.1:8765]
     end
 
     subgraph N1["node n1 (python -m server.serve)"]
@@ -54,6 +60,8 @@ flowchart LR
     C1 -- "gRPC + token<br/>redirect to leader" --> A1
     H --> A1
     D -- "GetNodeStatus" --> P1
+    W -- "GetNodeStatus, DumpState" --> P1
+    W -- "ClusterClient: login, register,<br/>create, bid, ask" --> A1
     P1 <-- "RequestVote / AppendEntries" --> N2
     P1 <-- "RequestVote / AppendEntries" --> N3
     A1 -- "leader only, deadline 25 s" --> L
@@ -167,9 +175,15 @@ retries with the same `(client_id, seq)` (decisions.md A17, A18). Close the
 leader's window mid-run to watch it fail over.
 
 Seeded accounts: `mrudul`, `nisarg`, `karan`, `tanmay`, password `pass`
-(`server/auth_servicer.py`).
+(`sessions/users.py`). More accounts can be created at run time with
+`AuthService.Register` (the web dashboard's "Create account" tab, or
+`ClusterClient.register(username, password)`); see [Validation rules](#validation-rules).
 
-### The dashboard
+### The terminal dashboard
+
+For the browser dashboard see
+[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard).
+The terminal one only watches a cluster that something else started:
 
 ```powershell
 .venv\Scripts\python.exe scripts\dashboard.py                    # a run_cluster.ps1 cluster
@@ -190,6 +204,7 @@ typed RPCs; `process_business_request` calls the server's
 
 ```python
 c = ClusterClient(["127.0.0.1:50071", "127.0.0.1:50072", "127.0.0.1:50073"])
+c.register("alice", "alice123")          # optional: a new, replicated account
 c.login("mrudul", "pass")
 c.post(c.token, "bid", {"auction_id": 1, "amount": 150})
 c.post(c.token, "payment", {"auction_id": 1, "action": "pay", "amount": 150})   # the winner, after the close
@@ -259,6 +274,155 @@ tested in `tests\test_replay.py`. The page only displays it.
 
 ---
 
+## Walk through the demo yourself (web dashboard)
+
+One command starts the LLM server, three Raft nodes and a web page that shows
+them live and lets you act on them. Everything on the page comes from the
+cluster: node rows from `StatusService.GetNodeStatus` (10 polls a second),
+auctions and accounts from the leader's `DumpState` (3 a second), and every
+action goes through the normal `ClusterClient`, so it follows leader
+redirects and retries exactly as any client does.
+
+### Start it
+
+```powershell
+.venv\Scripts\python.exe -m dashboard --open              # real LLM (needs Ollama + the model, see Environment)
+.venv\Scripts\python.exe -m dashboard --open --llm fake   # canned LLM answers, no Ollama needed
+.venv\Scripts\python.exe -m dashboard --llm none          # no LLM server: no descriptions, the assistant says it is unavailable
+```
+
+It prints the URL (`http://127.0.0.1:8765/`) and the run directory
+(`runs\dashboard-<time>\`, with each node's `data\` and `logs\`). `--open`
+opens the page in your browser and `--port` changes the HTTP port (8765, not
+8080, because Docker and WSL listen on 8080 on the dev machine; the dashboard
+binds its port exclusively and stops with an error if it is taken). **Ctrl+C
+stops the dashboard and the cluster it started.** It uses the
+`run_cluster.ps1` ports (client 50071-50073, peer 50061-50063, LLM 50052), so
+do not run it at the same time as `run_cluster.ps1` or `demo.ps1`; on the
+other hand `python -m client.auction_client` works against it unchanged. To
+restart on the same logs (every node replays its log from disk):
+`python -m dashboard --run-dir runs\dashboard-<time>`.
+
+Wait until the header shows a gold **★ leader** pill and **LLM ready**. If it
+says **LLM down**, Ollama is not running: start the Ollama app and restart the
+dashboard, or use `--llm fake`. The first model load takes about 15 s, and the
+dashboard does it in the
+background.
+
+### What is on the page
+
+- **Cluster** (top left). Three nodes in a triangle; the leader is drawn in
+  gold. **Gold dots** run from the leader to each follower: each one is an
+  `AppendEntries` the follower accepted (its `heartbeats_received` counter
+  went up between two polls). **Green dots** run back when the leader's reply
+  counter for that follower goes up. The **ring** around a follower is its
+  **election timer**: every heartbeat refills it, and if it runs out the node
+  becomes a candidate (orange). A killed node is grey with a red cross, a
+  suspended one is light blue. The box in the corner shows how many nodes are
+  up and the majority needed (2 of 3).
+- **Node cards** (under the triangle). Role, term, vote, leader, commit index,
+  last applied, last log index and term, state digest (same colour means same
+  state), pid and start count. Below that: heartbeats received (or sent, on
+  the leader) with how long ago the last one arrived (the dot is green while
+  they keep coming), the election-timer bar with the milliseconds left, and,
+  on the leader, each follower's `matchIndex`/`nextIndex` and how long ago it
+  last replied. Buttons: **Kill -9** (TerminateProcess on the whole process
+  tree, no cleanup), **Suspend** / **Resume** (NtSuspendProcess: frozen,
+  sockets stay open), **Restart** (same data dir: the node replays its log
+  and the leader sends it what it missed).
+- **Account** (right). Log in (one-click buttons for the test users, password
+  `pass`) or **Create account**. Each browser **tab** is its own session, so
+  two tabs can be two different users side by side.
+- **New auction**. Item, duration (30 s to 1 h, or custom 15 s to 30 days),
+  and optional attributes. With attributes, the leader asks the LLM to write
+  the description before it proposes the auction.
+- **Auctions**. One card per auction: seller (marked `YOU` on your own),
+  description, high bid, countdown and bar, the latest bids, the bid form,
+  and after the close the winner, the summary and the escrow state. **Ask
+  assistant** opens that auction's own assistant (see step 6); the seller
+  also gets **Edit description**. Filters: All / Open / Closed / Mine.
+- **Users** and **Events**. Every account, and a log of kills, elections,
+  new leaders, users, auctions, bids, closes, summaries and escrow changes.
+
+### A ten-minute walkthrough
+
+1. **Watch the heartbeats.** Gold dots leave the leader every 100 ms (the
+   heartbeat interval). Each follower's ring refills before it can run out
+   (the election timeout is 0.5-1.0 s), and the heartbeat counters on the
+   node cards keep climbing. The header says `3/3 in sync`.
+2. **Create a user.** Account card → **Create account** → `alice` /
+   `alice123` / `alice123`. Events shows `new user alice`, alice appears
+   under Users, and you are signed in as alice. Try `Alice`, `al`, a
+   3-character password, or two different passwords first: each one is
+   refused with the reason under the field.
+3. **Create an auction as alice.** New auction → item `vintage camera`, runs
+   for **2 minutes**, attributes `condition` = `mint` and `brand` = `Leica` →
+   **Create auction**. A card appears with an LLM-written description.
+4. **Try to bid on your own auction.** On alice's card the bid form is
+   replaced by *"You can't bid on your own auction."* Click **Send a bid
+   anyway**. The dashboard skips its own check and sends the bid to the
+   cluster, and the card shows the cluster's refusal: `alice is the seller of
+   this auction: a seller cannot bid on their own auction (refused by the
+   cluster's state machine)`. The rule is in `apply()`, so no client can get
+   around it.
+5. **Bid as someone else.** Open a **second tab** on the same URL, click
+   `karan`, and bid on the camera. The form is prefilled with the high bid
+   + 1, and `+10`, `+50`, `+100` change it. Both tabs show the new price and
+   the bid in the list. Try `0`, `10.5`, `-3`, or a bid that is not above
+   the high bid: each is refused with a reason.
+6. **Ask the auction's assistant.** In karan's tab click **Ask assistant** on
+   the camera and ask *"Can I bid on this?"* or *"Am I winning?"*. Ask the
+   same in alice's tab. The model is told who is asking, who the seller is
+   and who holds the high bid, so it tells alice that she cannot bid and
+   tells karan that he is winning. Each auction has its own assistant and its
+   own thread, and the model gets only that auction's live state.
+7. **Kill the leader.** Click **Kill -9** on the gold card. The gold dots
+   stop, the followers' rings run down, one node turns orange (candidate) and
+   then a new leader turns gold with the term one higher. Events shows
+   `killed n1 (leader)`, then `... candidate, term 2` and `... leader, term
+   2`. Bid again in karan's tab and it works: the session token was
+   replicated, and the client found the new leader.
+8. **Bring it back.** **Restart** the dead node. Its card shows `start #2`,
+   its commit index climbs to the leader's, its digest turns the same colour,
+   and the header goes back to `3/3 in sync`.
+9. **Lose the majority.** Kill **two** nodes. The corner box says **No
+   quorum**, and a bid now fails after about 15 s with *"No leader answered
+   in time"*: one node out of three cannot commit anything. Restart one node,
+   a leader is elected, and bids work again. Then restart the third.
+10. **Freeze a follower.** **Suspend** a follower. It turns light blue, and on
+    the leader's card its *last reply* age climbs and turns red, while bids
+    still commit on the other two nodes. **Resume** it and it catches up.
+    Suspending the leader instead shows a deposed leader coming back with an
+    old term.
+11. **Watch the close.** When the countdown reaches 0 the card says
+    `CLOSING…` until the leader's closer commits `CloseAuction`. Then it shows
+    **Won by karan at ...** and, a few seconds later, the **summary**.
+12. **Stop.** Press Ctrl+C in the terminal. The run is kept in
+    `runs\dashboard-<time>\`, with one log per node in `logs\`.
+
+### Validation rules
+
+Every input is checked in three layers, and the last one decides:
+
+| layer | where | what |
+|---|---|---|
+| 1. dashboard | `dashboard/validate.py`, `dashboard/static/app.js` | types and ranges (whole numbers only, size limits, the body must be a JSON object), plus a friendly pre-check (seller, closed, not above the high bid) |
+| 2. node handler | `server/auction_servicer.py`, `server/auth_servicer.py` | the same id and item rule as `apply()`, the close time against the leader's clock (in the future, at most 30 days ahead), at most 8 attributes of bounded size, and the username and password rules, all before the LLM is called or anything is proposed |
+| 3. `apply()` on every replica | `auction/state.py` (`create_rejection`, `bid_rejection`), `sessions/state.py` (`RegisterUser`) | **a seller cannot bid on their own auction**; a bid must be a positive whole number above the high bid and before the close; a create needs a positive id and a 1-100 character item name with no leading or trailing spaces; a username must be unique (seeded names included) and match `^[a-z][a-z0-9_]{2,19}$` |
+
+Passwords are 4-64 characters. The leader hashes them with PBKDF2-HMAC-SHA256
+(100 000 rounds, random salt) **before proposing**, so the Raft log holds only
+`(salt, hash)`. `DumpState` shows usernames and a short hash of the stored
+hash, never the salt or the hash itself. If a login's password check fails on
+a follower, the follower redirects it to the leader (it may not have applied a
+new account yet), and the leader checks again after a read barrier before
+saying no. The checker's `rejections-consistent-with-final-state` property
+knows the two new bid refusals and checks them against the final state (the
+refused bidder must really be the seller). Tests:
+`tests/test_validation_rules.py`.
+
+---
+
 ## Tests, stress, chaos, checker
 
 ```powershell
@@ -277,7 +441,7 @@ tested in `tests\test_replay.py`. The page only displays it.
   (for example `test_workload.py`, `test_failover_grpc.py`,
   `test_serve_grpc.py`, `test_harness.py`). Don't run the suite during a chaos
   run (testing-and-chaos.md Known gaps 13).
-- Last full run: 654 passed, 1 failed, 3 xfailed; the one failure was a stale assertion in `test_assistant_grpc.py` (it looked for the old summary prompt), fixed and re-run on its own: 1 passed. The 3 xfails are strict xfails: the
+- Last full run (2026-11-16, after the web dashboard and validation rules): 752 passed, 3 xfailed in 114 s. The 3 xfails are strict xfails: the
   persistence tests run against MemoryStorage, to prove those tests can fail
   (decisions.md P13).
 - `pytest.ini` sets `--capture=sys`. With pytest's default capture a gRPC log
@@ -419,8 +583,21 @@ there.
 - **The peer port is plain TCP with no auth.** Session tokens are stored in
   plain text in `log.bin` ([auction-on-raft.md](docs/auction-on-raft.md) §15).
 - **Not built from the problem statement:** an `ExtendAuction` command (the
-  anti-snipe stretch goal). The dashboard shows a state digest rather than each
-  node's high bid.
+  anti-snipe stretch goal). The terminal dashboard shows a state digest rather
+  than each node's high bid.
+- **Logs from before the validation rules replay differently.** The seller
+  rule and the create checks are in `apply()`, so a `data\` directory written
+  earlier, in which a seller bid on their own auction, now replays that bid as
+  refused (the same on every node, so the replicas still agree, but not what
+  was acknowledged then). Wipe old data first: `Remove-Item -Recurse data`.
+- **The web dashboard's view is the leader's local state** (`DumpState`, not a
+  read-index read), refreshed 3 times a second, and its heartbeat counters are
+  each node's own and reset when a node restarts. Pulses are drawn from
+  counter deltas between polls (at most 3 per 250 ms poll), so they show that
+  heartbeats arrive and roughly how often, not each RPC's exact time.
+- **Each auction's assistant answers one question at a time.** The thread on
+  the card is kept in the browser tab; the model sees the auction's live state
+  and who is asking, not the earlier questions.
 - **Payment is a mock, and not atomic with the commit.** A release or refund
   asked of the gateway cannot be undone; a payout race across a leader change
   is possible in principle and untested. Only the seller can refund; there is no
