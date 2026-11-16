@@ -201,6 +201,12 @@ message AuctionContext {
   // has no use for a bid list. This is scope, not privacy: the summary job
   // does get per-bid detail, names included, on bid_history below.
   int64 bid_count = 6;
+  // The seller's username. The FAQ job uses it to answer "can I bid?"
+  // correctly: apply() refuses a seller's bid on their own auction.
+  string seller = 7;
+  // Who holds current_high_bid ("" if nobody bid), so "am I winning?" has a
+  // true answer. Usernames only; the bid list itself stays out (see above).
+  string current_high_bidder = 8;
 }
 
 // One seller-supplied attribute, e.g. ("condition", "mint"). A repeated
@@ -234,6 +240,10 @@ message BiddingQuestionRequest {
   // work?"); set when the bidder is asking about a specific auction ("am I
   // still leading?"), which is the case §4 means by context-aware.
   AuctionContext auction = 3;
+  // The username of whoever asked, from the validated token (never from the
+  // request). Lets the model say "you are the seller" instead of advising
+  // the seller to bid. Server-originated, not caller text.
+  string asker = 4;
 }
 
 message ItemDescriptionRequest {

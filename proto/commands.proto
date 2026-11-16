@@ -41,6 +41,7 @@ message Command {
     RefundEscrow refund_escrow = 17;
     SetDescription set_description = 18;
     RecordSummary record_summary = 19;
+    RegisterUser register_user = 20;
   }
 }
 
@@ -118,4 +119,13 @@ message SetDescription {
 message RecordSummary {
   int64 auction_id = 1;
   string summary = 2;
+}
+
+// 1:1 with sessions/state.py's RegisterUser. salt and password_hash are
+// PBKDF2-HMAC-SHA256 values computed on the leader BEFORE proposing
+// (sessions/users.py); the password itself never enters the log.
+message RegisterUser {
+  string username = 1;
+  string salt = 2;          // hex
+  string password_hash = 3; // hex
 }

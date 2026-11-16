@@ -45,6 +45,34 @@ message NodeStatus {
   // The index of the last COMMAND entry folded into state_digest. Can be
   // below last_applied: no-op entries never reach the state machine.
   int64 digest_index = 11;
+
+  // --- liveness telemetry, for the web dashboard (dashboard/) ---------------
+  // Local counters, not replicated, reset when the process restarts.
+  //
+  // Follower / candidate side: AppendEntries RPCs accepted from the leader of
+  // the current term (heartbeats and entry-carrying ones alike: in Raft a
+  // heartbeat IS an AppendEntries), and how long ago the last one arrived.
+  int64 heartbeats_received = 12;
+  int64 last_heartbeat_age_ms = 13;   // -1 = none since this process started
+  // Time left on the election timer; it is reset by every heartbeat. 0 on a
+  // leader (a leader has no election timer).
+  int64 election_timer_left_ms = 14;
+  // Leader side: heartbeat rounds sent (one per heartbeat interval), and per
+  // follower, replies received in this term.
+  int64 heartbeats_sent = 15;
+  repeated PeerReplication peers = 16;
+  int64 heartbeat_interval_ms = 17;
+  int64 election_timeout_min_ms = 18;
+  int64 election_timeout_max_ms = 19;
+  int64 pid = 20;                     // this process's id (os.getpid())
+}
+
+message PeerReplication {
+  string peer_id = 1;
+  int64 replies = 2;           // AppendEntries replies from this peer, this term
+  int64 last_reply_age_ms = 3; // -1 = none yet
+  int64 match_index = 4;       // Figure 2 matchIndex
+  int64 next_index = 5;        // Figure 2 nextIndex
 }
 
 message DumpStateRequest {}

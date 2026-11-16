@@ -50,6 +50,11 @@ class AuthServiceStub:
                 request_serializer=auction__pb2.LogoutRequest.SerializeToString,
                 response_deserializer=auction__pb2.LogoutResponse.FromString,
                 _registered_method=True)
+        self.Register = channel.unary_unary(
+                '/auction.AuthService/Register',
+                request_serializer=auction__pb2.RegisterRequest.SerializeToString,
+                response_deserializer=auction__pb2.RegisterResponse.FromString,
+                _registered_method=True)
 
 
 class AuthServiceServicer:
@@ -76,6 +81,15 @@ class AuthServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Register(self, request, context):
+        """Create an account. Exempt from the token check, like Login. Replicated
+        as a RegisterUser command; the password is hashed on the leader before
+        proposing and never enters the log.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_AuthServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -88,6 +102,11 @@ def add_AuthServiceServicer_to_server(servicer, server):
                     servicer.Logout,
                     request_deserializer=auction__pb2.LogoutRequest.FromString,
                     response_serializer=auction__pb2.LogoutResponse.SerializeToString,
+            ),
+            'Register': grpc.unary_unary_rpc_method_handler(
+                    servicer.Register,
+                    request_deserializer=auction__pb2.RegisterRequest.FromString,
+                    response_serializer=auction__pb2.RegisterResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -150,6 +169,33 @@ class AuthService:
             '/auction.AuthService/Logout',
             auction__pb2.LogoutRequest.SerializeToString,
             auction__pb2.LogoutResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def Register(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/auction.AuthService/Register',
+            auction__pb2.RegisterRequest.SerializeToString,
+            auction__pb2.RegisterResponse.FromString,
             options,
             channel_credentials,
             insecure,
