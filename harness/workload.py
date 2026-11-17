@@ -223,7 +223,7 @@ class Seller(Actor):
             self.settle()
             if len(w.board.open_ids()) < w.max_open:
                 self.made += 1
-                auction_id = (self.index + 1) * 1_000_000 + self.made
+                auction_id = w.id_base + (self.index + 1) * 1_000_000 + self.made
                 close = now_us() + int(self.rng.uniform(*w.close_after) * 1e6)
                 attrs = {"condition": self.rng.choice(["mint", "used", "worn"]), "lot": str(auction_id)} \
                     if self.rng.random() < w.llm_fraction else None
@@ -323,11 +323,14 @@ class Payer(Actor):
 class Workload:
     def __init__(self, addrs, seed, *, sellers=1, bidders=4, racers=3, think=(0.0, 0.3),
                  close_after=(15.0, 60.0), max_open=4, llm_fraction=0.3, race_every=(0.5, 2.0),
-                 give_up_after=30.0, payers=len(USERS)):
+                 give_up_after=30.0, payers=len(USERS), id_base=0):
         if racers > len(USERS):
             raise ValueError(f"at most {len(USERS)} racers: each needs its own username")
         self.addrs = list(addrs)
         self.seed = seed
+        # Added to every auction id, so two runs against the same cluster (the
+        # web dashboard's chaos button) never reuse an id.
+        self.id_base = id_base
         self.history = History()
         self.board = Board()
         self.stopping = threading.Event()
