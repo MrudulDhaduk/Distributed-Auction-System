@@ -41,6 +41,8 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
+from auction.state import create_rejection
+
 WELL_FORMED = "history-well-formed"
 ACKED_PRESENT = "acked-writes-on-every-node-exactly-once"
 IDENTICAL = "replicas-identical"
@@ -74,6 +76,11 @@ _STALE = re.compile(r"^stale request")
 _DUP_ID = re.compile(r"^ID already exists")
 # auction/state.py bid_rejection: the seller's own bid, a non-positive amount.
 _OWN_AUCTION = re.compile(r"^(\S+) is the seller of this auction: a seller cannot bid on their own auction$")
+# Create refusals: server/auction_servicer.py close_time_rejection and
+# auction/state.py create_rejection.
+_CREATE_PAST = re.compile(r"^The close time must be in the future$")
+_CREATE_TOO_LONG = re.compile(r"^An auction can run for at most \d+ days$")
+_CREATE_SHAPE = re.compile(r"^(Auction ID must be a positive|The item name |An auction needs a seller)")
 _NOT_POSITIVE = re.compile(r"^Bid amount must be a positive whole number, not (-?\d+)$")
 
 # The reasons apply() gives for a refused payment or settlement
@@ -340,6 +347,20 @@ def check_rejections(history, states) -> PropertyResult:
             if _DUP_ID.match(reason):
                 if a is None:
                     violations.append(f"{who}: create {r['auction_id']} refused as duplicate, but no such auction")
+            elif _CREATE_PAST.match(reason):
+                # The handler compares close_time with the leader's clock. A create
+                # retried across a failover can arrive after its own close time.
+                if r.get("close_time") is None or r["close_time"] > r["end"]:
+                    violations.append(f"{who}: create {r['auction_id']} refused as in the past, "
+                                      f"but its close time was still ahead when the reply came")
+            elif _CREATE_TOO_LONG.match(reason):
+                if r.get("close_time") is None or r["close_time"] - r["start"] <= 30 * 86_400_000_000:
+                    violations.append(f"{who}: create {r['auction_id']} refused as too long, but it was not")
+            elif _CREATE_SHAPE.match(reason):
+                expected = create_rejection(r["auction_id"], r.get("item", ""), r["user"])
+                if expected != reason:
+                    violations.append(f"{who}: create {r['auction_id']} refused with {reason!r}, "
+                                      f"but its id and item are valid")
             else:
                 violations.append(f"{who}: create {r['auction_id']} refused with unexpected reason {reason!r}")
             continue

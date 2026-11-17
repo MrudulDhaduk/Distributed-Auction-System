@@ -28,7 +28,7 @@ from server.auth_servicer import AuthServicer
 from sessions.state import RegisterUser, SessionState
 from sessions.store import SessionStore
 from sessions.users import hash_password, password_rejection, username_rejection
-from tests.test_checker import edit_dump, evidence, failed, rec, scenario
+from tests.test_checker import edit_dump, evidence, failed, rec, scenario, us
 
 T0 = datetime.datetime(2026, 11, 16, 12, 0, tzinfo=datetime.timezone.utc)
 LATER = T0 + datetime.timedelta(hours=1)
@@ -390,3 +390,49 @@ def test_the_faq_prompt_says_whether_the_asker_holds_the_high_bid():
     assert "high bidder:      karan" in system("karan")
     assert "They hold the current high bid." in system("karan")
     assert "They do not hold the current high bid." in system("mrudul")
+
+
+# --- the checker: create refusals added with the validation rules ---------------
+
+
+def test_the_checker_accepts_a_create_refused_because_its_close_time_had_passed():
+    history, dumps, leaders = scenario()
+    history.append(rec("seller", 9, "create", "rejected", 50, auction_id=7, item="lamp",
+                       close_time=us(49), reason="The close time must be in the future"))
+    assert P.REJECTIONS not in failed(check_all(history, dumps, leaders))
+
+
+def test_the_checker_catches_a_past_close_refusal_whose_close_was_still_ahead():
+    history, dumps, leaders = scenario()
+    history.append(rec("seller", 9, "create", "rejected", 50, auction_id=7, item="lamp",
+                       close_time=us(500), reason="The close time must be in the future"))
+    report = check_all(history, dumps, leaders)
+    assert P.REJECTIONS in failed(report)
+    assert "still ahead" in evidence(report, P.REJECTIONS)
+
+
+def test_the_checker_checks_an_item_refusal_against_the_item():
+    history, dumps, leaders = scenario()
+    history.append(rec("seller", 9, "create", "rejected", 50, auction_id=7, item="lamp",
+                       close_time=us(500), reason="The item name must not be empty"))
+    assert P.REJECTIONS in failed(check_all(history, dumps, leaders))
+    history[-1] = dict(history[-1], item="")
+    assert P.REJECTIONS not in failed(check_all(history, dumps, leaders))
+
+
+def test_a_scenario_runs_end_to_end_without_a_cluster_and_reports():
+    """ScenarioRun's view() is what the page draws; it must work before any write."""
+    from dashboard.scenarios import SCENARIOS, ScenarioRun
+
+    class Dash:
+        client_addrs = ["127.0.0.1:1"]
+        run_dir = "x"
+
+        def event(self, *a, **k):
+            pass
+
+    run = ScenarioRun(Dash(), "chaos", 1, duration=60, faults=True, seed=5)
+    v = run.view()
+    assert v["state"] == "running" and v["duration"] == 60 and v["faults"] and v["seed"] == 5
+    assert v["stats"]["writes"] == 0 and v["report"] is None
+    assert set(SCENARIOS) == {"clock", "demo", "chaos"}
