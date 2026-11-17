@@ -38,6 +38,26 @@
       <div class="nodes" id="nodes"></div>
     </div>
 
+    <div class="card" id="scenario-card">
+      <div class="card-head">
+        <h2>Scenarios</h2>
+        <span class="hint">Run on this cluster. Kill, suspend or restart nodes while they run.</span>
+      </div>
+      <div class="scen-buttons">
+        <button class="scen-btn" data-scen="clock"><b>Vintage clock</b><span>1 auction, 3 bidders, equal-bid race, payment · about 75 s</span></button>
+        <button class="scen-btn" data-scen="demo"><b>Four auctions</b><span>hero auction + 3 auctions, 6 background bidders · about 2 min</span></button>
+        <div class="scen-btn scen-chaos">
+          <button data-scen="chaos"><b>Chaos workload</b><span>random sellers, bidders, races and payers</span></button>
+          <div class="scen-opts">
+            <label for="chaos-dur">for</label>
+            <select id="chaos-dur"><option value="60">1 min</option><option value="120" selected>2 min</option><option value="300">5 min</option></select>
+            <label class="check"><input type="checkbox" id="chaos-faults"> automatic faults</label>
+          </div>
+        </div>
+      </div>
+      <div id="scen-run"></div>
+    </div>
+
     <div class="card">
       <div class="card-head">
         <h2>Auctions</h2>

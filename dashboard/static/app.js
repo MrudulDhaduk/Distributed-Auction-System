@@ -122,6 +122,7 @@ function render(d) {
   renderAuctions(d);
   renderUsers(d);
   renderEvents(d, first);
+  renderScenario(d);
   S.pollAt = performance.now();
   for (const n of d.nodes) S.prevStatus[n.node_id] = n.status ? { ...n.status, process: n.process } : { process: n.process };
 }
@@ -866,7 +867,97 @@ document.querySelectorAll("#filters .chip").forEach(c => c.addEventListener("cli
   document.querySelectorAll("#filters .chip").forEach(x => x.classList.remove("active"));
   c.classList.add("active"); S.filter = c.dataset.filter; tickCountdowns();
 }));
+/* ---------- scenarios ---------- */
+const PROPERTY_LABEL = {
+  "history-well-formed": "client histories are well formed",
+  "acked-writes-on-every-node-exactly-once": "every acknowledged write is on every node, once",
+  "replicas-identical": "all replicas hold identical state",
+  "bids-strictly-increasing-winner-is-max": "bids only go up; the winner is the highest bid",
+  "no-bid-accepted-after-close": "no bid accepted after the close",
+  "rejections-consistent-with-final-state": "every refusal matches the final state",
+  "unknown-outcome-at-most-once": "unknown outcomes applied at most once",
+  "at-most-one-leader-per-term": "at most one leader per term",
+  "escrow-legal-and-at-most-one-payment": "escrow legal, at most one payment",
+  "summary-at-most-one-on-closed-auction": "at most one summary, only after the close",
+};
+let scenRef = null;
+
+function setupScenarios() {
+  document.querySelectorAll("[data-scen]").forEach(b => b.addEventListener("click", () => {
+    const body = b.dataset.scen === "chaos"
+      ? { duration: Number($("#chaos-dur").value), faults: $("#chaos-faults").checked } : {};
+    withBusy(b, async () => {
+      try { const r = await api(`/api/scenarios/${b.dataset.scen}/start`, body); toast(r.message, "ok"); }
+      catch (e) { toast(e.message, "err"); }
+    });
+  }));
+}
+
+function buildScenarioRun(sc) {
+  const box = $("#scen-run");
+  box.innerHTML = `
+    <div class="scen-head"><b></b><span class="scen-state"></span><span class="hint scen-time"></span><span class="spacer"></span>
+      <button class="btn small danger scen-stop">Stop</button></div>
+    <div class="bar"><i></i></div>
+    <div class="scen-stats"></div>
+    <ul class="scen-steps"></ul>
+    <div class="scen-report"></div>`;
+  const stop = $(".scen-stop", box);
+  stop.onclick = () => withBusy(stop, async () => {
+    try { const r = await api("/api/scenarios/stop"); toast(r.message, "ok"); } catch (e) { toast(e.message, "err"); }
+  });
+  scenRef = { number: sc.number, title: $(".scen-head b", box), state: $(".scen-state", box), time: $(".scen-time", box),
+              stop, bar: $(".bar i", box), stats: $(".scen-stats", box), steps: $(".scen-steps", box),
+              report: $(".scen-report", box), stepsKey: "", reportKey: "" };
+}
+
+function renderScenario(d) {
+  const sc = d.scenario;
+  const running = sc && (sc.state === "running" || sc.state === "checking");
+  document.querySelectorAll("[data-scen]").forEach(b => { if (!b.classList.contains("busy")) b.disabled = !!running; });
+  if (!sc) { $("#scen-run").innerHTML = ""; scenRef = null; return; }
+  if (!scenRef || scenRef.number !== sc.number) buildScenarioRun(sc);
+  const R = scenRef;
+  R.title.textContent = `${sc.title}${sc.key === "chaos" ? ` (${sc.duration} s${sc.faults ? ", automatic faults" : ""}, seed ${sc.seed})` : ""}`;
+  R.state.textContent = sc.state; R.state.className = `scen-state ${sc.state}`;
+  R.time.textContent = sc.duration ? `${Math.floor(sc.elapsed)} / ~${sc.duration} s` : `${Math.floor(sc.elapsed)} s`;
+  R.stop.hidden = sc.state !== "running";
+  R.bar.style.width = sc.state === "running" && sc.duration ? `${Math.min(100, sc.elapsed / sc.duration * 100)}%` : (sc.state === "running" ? "0" : "100%");
+  const st = sc.stats;
+  R.stats.innerHTML = "";
+  for (const [label, v] of [["writes", st.writes], ["accepted", st.ok], ["refused", st.rejected], ["unknown outcome", st.unknown], ["bids", st.bids]]) {
+    const s = el("span"); s.append(el("b", null, fmt(v || 0)), ` ${label}`); R.stats.appendChild(s);
+  }
+  const stepsKey = sc.steps.length ? `${sc.steps.length}:${sc.steps[sc.steps.length - 1].t}:${sc.steps[sc.steps.length - 1].text}` : "";
+  if (stepsKey !== R.stepsKey) {
+    R.stepsKey = stepsKey;
+    R.steps.innerHTML = "";
+    for (const s of [...sc.steps].reverse()) {
+      const li = el("li"); li.append(el("span", null, `${s.t.toFixed(1)}s`), el("span", null, s.text)); R.steps.appendChild(li);
+    }
+  }
+  const reportKey = sc.report ? sc.report.map(r => `${r.name}${r.passed}`).join() : (sc.error || "");
+  if (reportKey !== R.reportKey) {
+    R.reportKey = reportKey;
+    R.report.innerHTML = "";
+    if (sc.error) R.report.appendChild(el("div", "ev", sc.error));
+    if (sc.report) {
+      const passed = sc.report.filter(r => r.passed).length;
+      R.report.appendChild(el("div", "scen-report-head", `Checker: ${passed}/${sc.report.length} properties pass · saved in ${sc.run_dir}`));
+      for (const r of sc.report) {
+        const row = el("div", "row");
+        row.append(el("span", r.passed ? "pass" : "fail", r.passed ? "PASS" : "FAIL"),
+                   el("span", null, PROPERTY_LABEL[r.name] || r.name), el("span", "n", `${fmt(r.checked)} checked`));
+        row.title = r.name;
+        for (const v of r.violations) row.appendChild(el("span", "ev", v));
+        R.report.appendChild(row);
+      }
+    }
+  }
+}
+
 renderAccount();
 setupCreateForm();
+setupScenarios();
 poll();
 requestAnimationFrame(frame);

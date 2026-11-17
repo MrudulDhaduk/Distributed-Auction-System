@@ -45,6 +45,7 @@ import grpc
 from client.auction_client import ClusterClient, ClusterUnavailable
 from common import time_conv
 from dashboard import validate
+from dashboard.scenarios import CHAOS_DURATIONS, SCENARIOS, ScenarioRun
 from dashboard.validate import Invalid
 from generated import status_pb2, status_pb2_grpc
 from harness.procs import LocalCluster
@@ -122,6 +123,9 @@ class Dashboard:
         self._ever_up = set()
         self._prev_auctions = None
         self._prev_users = None
+        self._leaders = set()                                 # (term, node) LEADER sightings, for the checker
+        self.scenario = None                                  # the current or last ScenarioRun
+        self._scenario_no = 0
 
     # --- lifecycle -----------------------------------------------------------------
 
@@ -136,6 +140,8 @@ class Dashboard:
 
     def stop(self):
         self._stop.set()
+        if self.scenario is not None:
+            self.scenario.stop()
         for s in list(self.sessions.values()):
             s.close()
         try:
@@ -188,6 +194,8 @@ class Dashboard:
             self._status_events(view, leader)
             with self._lock:
                 self.nodes, self.leader = view, leader
+                for s in leaders:
+                    self._leaders.add((s["term"], s["node_id"]))
 
     def _status_events(self, view, leader):
         for nid, s in view.items():
@@ -228,7 +236,8 @@ class Dashboard:
             with self._lock:
                 self.auctions, self.users = auctions, users
                 self.state_from, self.state_at = source, now_us()
-                ids = [a["auction_id"] for a in auctions]
+                # Ids from 1 000 000 up belong to the chaos workload's own numbering.
+                ids = [a["auction_id"] for a in auctions if a["auction_id"] < 1_000_000]
             with self._id_lock:
                 self._next_auction_id = max([self._next_auction_id] + ids)
 
@@ -258,8 +267,13 @@ class Dashboard:
                 old_bids = 0
             else:
                 old_bids = len(old["bids"])
-            for b in a["bids"][old_bids:]:
-                self.event("bid", f"{b['bidder']} bid {b['amount']:,} on #{aid}", auction=aid)
+            new_bids = a["bids"][old_bids:]
+            if len(new_bids) > 3:  # a busy scenario: one line per auction per poll, not one per bid
+                self.event("bid", f"{len(new_bids)} bids on #{aid}, high {a['high_bid']:,} by {a['high_bidder']}",
+                           auction=aid)
+            else:
+                for b in new_bids:
+                    self.event("bid", f"{b['bidder']} bid {b['amount']:,} on #{aid}", auction=aid)
             if a["closed"] and (old is None or not old["closed"]):
                 who = f"{a['winner']} won at {a['high_bid']:,}" if a["winner"] else "no bids"
                 self.event("close", f"#{aid} closed, {who}", auction=aid)
@@ -284,19 +298,23 @@ class Dashboard:
         from server.llm_client import LLMClient
 
         client = LLMClient(f"127.0.0.1:{self.cluster.llm.port}", deadline=60)
-        deadline = time.monotonic() + 120
-        while not self._stop.is_set() and time.monotonic() < deadline:
+        give_up = time.monotonic() + 120
+        # Keeps trying after it reports "down", so starting Ollama later (or
+        # restarting it) turns the pill back to ready without a restart.
+        while not self._stop.is_set():
             try:
                 client.get_llm_answer(request_id="dashboard-warmup", query="How do I place a bid?", context={})
                 self.llm_status = "ready"
                 self.event("llm", "LLM ready")
                 return
             except grpc.RpcError as e:
-                self.llm_status = "starting"
                 log.info("LLM not ready yet: %s", e.code())
-                self._stop.wait(2)
-        self.llm_status = "down"
-        self.event("llm", "LLM not responding")
+                if time.monotonic() < give_up:
+                    self.llm_status = "starting"
+                elif self.llm_status != "down":
+                    self.llm_status = "down"
+                    self.event("llm", "LLM not responding; is Ollama running?")
+                self._stop.wait(2 if self.llm_status == "starting" else 10)
 
     # --- reads for the page ----------------------------------------------------------
 
@@ -318,6 +336,8 @@ class Dashboard:
                 "events": list(self.events)[-120:], "llm": self.llm_status,
                 "llm_mode": self.llm_mode, "me": me.username if me else None,
                 "run_dir": self.run_dir,
+                "scenario": None if self.scenario is None else self.scenario.view(),
+                "scenarios": {"catalog": SCENARIOS, "chaos_durations": CHAOS_DURATIONS},
             }
 
     def _auction(self, auction_id):
@@ -358,6 +378,43 @@ class Dashboard:
             node.resume()
             self.event("resume", f"resumed {nid}", node=nid)
         return {"ok": True, "message": f"{action}: {nid}", "process": node.state}
+
+    # --- scenarios -------------------------------------------------------------------
+
+    def leader_sightings(self) -> list:
+        with self._lock:
+            return [{"term": t, "node": n, "source": "dashboard-status"} for t, n in sorted(self._leaders)]
+
+    def reserve_auction_ids(self, count) -> list:
+        with self._id_lock:
+            first = self._next_auction_id + 1
+            self._next_auction_id += count
+        return list(range(first, first + count))
+
+    def start_scenario(self, name, payload):
+        if name not in SCENARIOS:
+            raise Invalid(f"No scenario {name!r}")
+        payload = validate.body(payload)
+        if self.scenario is not None and self.scenario.is_alive():
+            raise Invalid(f"{self.scenario.title} is still running; stop it first")
+        duration, faults = None, False
+        if name == "chaos":
+            duration = payload.get("duration", 120)
+            if duration not in CHAOS_DURATIONS:
+                raise Invalid(f"Duration must be one of {', '.join(map(str, CHAOS_DURATIONS))} seconds")
+            faults = payload.get("faults") is True
+        self._scenario_no += 1
+        run = ScenarioRun(self, name, self._scenario_no, duration=duration, faults=faults)
+        self.scenario = run
+        run.start()
+        return {"ok": True, "message": f"started {run.title}"}
+
+    def stop_scenario(self):
+        run = self.scenario
+        if run is None or not run.is_alive():
+            raise Invalid("Nothing is running")
+        run.stop()
+        return {"ok": True, "message": f"stopping {run.title}; the checker runs next"}
 
     # --- accounts --------------------------------------------------------------------
 
@@ -552,6 +609,10 @@ def make_handler(dash: Dashboard):
                     result = dash.bid(sid, payload)
                 elif path == "/api/ask":
                     result = dash.ask(sid, payload)
+                elif len(parts) == 4 and parts[:2] == ["api", "scenarios"] and parts[3] == "start":
+                    result = dash.start_scenario(parts[2], payload)
+                elif path == "/api/scenarios/stop":
+                    result = dash.stop_scenario()
                 elif path == "/api/describe":
                     result = dash.describe(sid, payload)
                 else:
