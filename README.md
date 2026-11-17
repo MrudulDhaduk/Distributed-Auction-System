@@ -343,8 +343,55 @@ background.
   also gets **Edit description**. Filters: All / Open / Closed / Mine.
 - **Users** and **Events**. Every account, and a log of kills, elections,
   new leaders, users, auctions, bids, closes, summaries and escrow changes.
+- **Scenarios** (under the cluster). Three buttons that start a predefined run
+  on this same cluster, so you can kill, suspend and restart nodes while
+  real clients are bidding (see below).
 
-### A ten-minute walkthrough
+### Scenarios: run the predefined auctions and break things while they run
+
+Each button starts real clients (one `ClusterClient` per user, with retries
+and leader redirects) against the cluster the dashboard owns. Only one
+scenario runs at a time. While it runs, use the node buttons as much as you
+like: kill the leader, suspend a follower, kill two nodes, restart them.
+
+| button | what it does | about |
+|---|---|---|
+| **Vintage clock** | nisarg sells a vintage clock (LLM description); karan, mrudul and tanmay bid, two of them bid 200 **at the same moment** (exactly one wins); the seller tries to bid on his own auction and is refused; karan asks the assistant; more bids every 5 s; after the close the winner pays into escrow and the seller releases it | 75 s |
+| **Four auctions** | the scripted demo's setup: a hero vintage clock plus a film camera, a pocket watch and a record player; six background bidders `bg1`-`bg6` bid on the three until they close and pay for what they win; the hero gets bids and an equal-bid race; at the end the seller releases three escrows and refunds one | 2 min |
+| **Chaos workload** | the chaos harness's workload (`harness/workload.py`): sellers creating auctions, bidders, three racers sending equal bids at once, payers; choose 1, 2 or 5 minutes. Tick **automatic faults** to also run the chaos harness's random fault schedule (leader and follower kills and suspends, each healed after a few seconds) on top of yours | 1-5 min |
+
+The card shows the steps as they happen (newest first), the write counts
+(accepted, refused, unknown outcome) and a **Stop** button. When the run ends
+or you stop it, the dashboard:
+
+1. restarts any node that is dead and resumes any that is suspended;
+2. waits until all three replicas agree;
+3. collects every node's `DumpState` and runs **the same ten checker
+   properties as the chaos run** on everything the scenario's clients saw;
+4. shows PASS / FAIL for each property on the card, with the first piece of
+   evidence for a failure, and saves the run (history, dumps, report) in
+   `runs\dashboard-<time>\scenario-<n>-<name>\`. Re-check it any time with
+   `.venv\Scripts\python.exe -m checker runs\dashboard-<time>\scenario-<n>-<name>`.
+
+Measured on 2026-11-17: **Vintage clock** with a leader kill and restart
+mid-run, 18 writes, all 10 properties PASS. **Four auctions** with a leader
+kill, a follower suspend/resume and a restart mid-run, 897 writes, all 10 PASS.
+**Chaos workload**, 60 s with automatic faults (3 leader kills, 3 suspends),
+771 writes, all 10 PASS (after the checker learned the create refusal below).
+
+The first chaos run found a checker gap: a seller's create, retried across a
+leader kill for longer than the auction's lifetime, reached the new leader
+after its own close time and was correctly refused ("The close time must be
+in the future"), but the checker did not know that reason. It now accepts it
+only if the close time really had passed when the reply came.
+
+The checker reads the whole replicated state, so anything you did by hand in
+the same cluster is checked as well.
+
+### A ten-minute walkthrough (by hand)
+
+To start with a busy cluster instead, press **Four auctions** (or **Chaos
+workload**) first and do steps 7-10 while it runs.
 
 1. **Watch the heartbeats.** Gold dots leave the leader every 100 ms (the
    heartbeat interval). Each follower's ring refills before it can run out
@@ -441,7 +488,7 @@ refused bidder must really be the seller). Tests:
   (for example `test_workload.py`, `test_failover_grpc.py`,
   `test_serve_grpc.py`, `test_harness.py`). Don't run the suite during a chaos
   run (testing-and-chaos.md Known gaps 13).
-- Last full run (2026-11-16, after the web dashboard and validation rules): 752 passed, 3 xfailed in 114 s. The 3 xfails are strict xfails: the
+- Last full run (2026-11-17, after the dashboard scenarios): 756 passed, 3 xfailed in 132 s. The 3 xfails are strict xfails: the
   persistence tests run against MemoryStorage, to prove those tests can fail
   (decisions.md P13).
 - `pytest.ini` sets `--capture=sys`. With pytest's default capture a gRPC log
