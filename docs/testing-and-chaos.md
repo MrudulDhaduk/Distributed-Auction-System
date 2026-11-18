@@ -475,6 +475,8 @@ earlier 10-minute runs.
    (PreVote, in Ongaro's thesis, is the other one). Not implemented: it's not in
    Figure 2, and this chunk doesn't touch `raft/`. If it hit today: an extra
    election after every slow-node episode, never a safety problem.
+   **Fixed later as an option:** PreVote mode (`tests/test_raft_prevote.py`;
+   README, "PreVote"). Classic mode, the default, still behaves as above.
 2. **The schedule is replayable, the run is not.** See 3.2. A failing run is
    analysed from its files, not re-run.
 3. **"Sent before the close" can still lose.** `curr_time` is stamped by the
@@ -487,7 +489,9 @@ earlier 10-minute runs.
 4. **One machine.** Clients and servers share a clock, which T11 relies on.
    Nothing here tests clock skew, network partitions (all faults are process
    faults), or disk faults (FileStorage's torn-tail handling is unit-tested in
-   step 6, not here).
+   step 6, not here). **Later:** the dashboard can cut Raft links between
+   nodes (a simulated partition, `tests/test_raft_partition.py`); the chaos
+   harness itself still injects only process faults.
 5. **Leader sightings can miss a term.** A leader that lived less than one
    50 ms poll *and* whose log line was lost to a kill -9 would be invisible.
    Election Safety would then be checked on fewer sightings, never falsely

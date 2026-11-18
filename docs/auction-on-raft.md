@@ -378,7 +378,7 @@ which applied directly, with naive datetimes. Every M1 case survives as a
 `test_auction_servicer.py`, `test_session_store.py`, `test_auth_interceptor.py`,
 `test_close_auction.py`, `test_concurrent_bidding.py`.
 
-**An M1 bug found, not fixed** (working rules: "point at the line and the case it
+**An M1 bug found, not fixed in this chunk** (working rules: "point at the line and the case it
 breaks on"). `common/time_conv.py:25`, `return int(dt.timestamp() *
 MICROS_PER_SECOND)`, does float arithmetic and then truncates. For
 `2039-12-20 05:40:54.254810` the float is `2207972454254809.8`, which
@@ -393,6 +393,8 @@ microsecond datetimes are off by one. It is pinned by a strict xfail,
 - The fix would be integer arithmetic,
   `(dt - EPOCH) // timedelta(microseconds=1)` and `EPOCH +
   timedelta(microseconds=m)`. That's your call.
+- **Fixed later** with exactly that arithmetic (decisions.md T1). The xfail
+  is now a normal test, `test_round_trip_is_exact_to_the_microsecond`.
 
 ---
 
@@ -702,9 +704,9 @@ catches up.
 | The dedupe table and the session table grow forever; no snapshots (P11) | not planned | Memory grows with distinct clients and logins; replay time grows with the log. |
 | A garbage token sent to the leader costs one read barrier (a heartbeat round) | not planned | A cheap way to make the leader send extra heartbeats. |
 | The peer port is plain TCP (A9) | production: mTLS | Anyone who can reach it can send Raft RPCs. |
-| No check-quorum: a partitioned leader keeps believing it leads | not planned | Its *reads* are safe (read-index times out). Its *writes* time out with UNAVAILABLE and the client moves on. It just wastes a few seconds per client. |
+| No check-quorum: a partitioned leader keeps believing it leads | not planned (pre-vote was added later; check-quorum was not) | Its *reads* are safe (read-index times out). Its *writes* time out with UNAVAILABLE and the client moves on. It just wastes a few seconds per client. |
 | A follower's leader hint can point at a dead leader (trace step 2) | not planned | One wasted connect attempt (~2 s on Windows) per client after a crash. |
-| M1 bug: `common/time_conv.py:25` loses 1 µs on ~2% of datetimes | your decision (section 8) | A bid stamped 1 µs after close can be recorded at close and accepted. Determinism is unaffected. |
+| M1 bug: `common/time_conv.py:25` loses 1 µs on ~2% of datetimes | fixed later (decisions.md T1) | A bid stamped 1 µs after close can be recorded at close and accepted. Determinism is unaffected. |
 | The closer stamps with the leader's clock; leaders' clocks can differ | inherent | After a failover, `closed_at` follows the new leader's clock. Each close is still decided once, the same on every node. |
 | `ClusterClient` is not thread-safe; one write at a time per client_id | by design (A18) | Two concurrent writes on one client could make the lower seq "stale". |
 

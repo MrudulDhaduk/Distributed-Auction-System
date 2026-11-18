@@ -13,11 +13,11 @@ says so.
 | fact | source |
 |---|---|
 | M1 (build-order steps 1-2: `apply()`, commands, the lock, gRPC, auth, sessions, auction RPCs, closer, LLM server) was written by you | working rules "The rule that overrides everything else" |
-| From M2 on, the code was written by an AI coding assistant one chunk at a time. You studied each chunk, discussed the decisions and made every commit yourself | working rules "The chunk loop"; git history: every M2 commit (2026-11-09 onward) is authored by you |
+| From M2 on, an AI tool was used to write the code | working rules "The chunk loop"; git history: every M2 commit (2026-11-09 onward) is authored by you |
 | Two M1 commits are by Nisarg Vagh (GitHub "Frostbitten-Caracal"): `8374041` "Name the auction owner in CreateAuction's result" and `172b0bc` "Revise auction process and user details in README", both 2026-09-28. The problem statement describes a two-member team | `git log --format="%h %an %s"`; `Documents/Problem_Statement.md` §10 |
 | Every chunk shipped with a walkthrough (`docs/<chunk>.md`), decision-log entries and a Known-gaps list | working rules "Explanation artifacts"; `docs/` |
 | Tests were written first and shown failing before each implementation, with the stated exceptions | working rules "The chunk loop"; [auction-on-raft.md](auction-on-raft.md) §13 (`test_failover_grpc.py` was written after the client) |
-| The M2 code, including chunk 7 (payment, LLM wiring), was written by an AI coding assistant under your review; the README says so in one line | README "Who wrote what" |
+| An AI tool was used for the M2 code, including chunk 7 (payment, LLM wiring); the README says so in one line | README "Who wrote what" |
 | Raft was written from the paper, with no Raft library | working rules "Non-negotiable design constraints"; `requirements.txt` (grpcio, grpcio-tools, pytest, rich, ollama) |
 
 ## 2. What was built, in order

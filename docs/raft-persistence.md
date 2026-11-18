@@ -508,7 +508,10 @@ cluster tests tolerate. A >5 s stall would fail a wait.
     restart, so the auction state machine must be built empty at boot and must
     be deterministic (it is: working-rules constraints). `SessionStore` is still not
     replicated, so tokens don't survive a restart (working-rules seams).
+    **Closed later:** the auction runs on the log and sessions are replicated
+    (decisions.md A3; [auction-on-raft.md](auction-on-raft.md)).
 11. **The trace over gRPC has only no-ops** (no client RPC yet; replication gap 7).
+    **Closed later** with the client RPCs ([auction-on-raft.md](auction-on-raft.md)).
 
 ---
 
