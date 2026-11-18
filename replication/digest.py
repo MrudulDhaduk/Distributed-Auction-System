@@ -71,6 +71,8 @@ def _auction(auction_id, a: dict) -> dict:
         # The ACCEPTED summaries, as a list: the checker verifies "at most one"
         # and "only on a closed auction" from it. [] until the first one.
         "summaries": list(a.get("summaries", [])),
+        "anti_snipe": bool(a.get("anti_snipe", False)),
+        "extensions": a.get("extensions", 0),
     }
 
 

@@ -164,6 +164,7 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
                 close_time=close_time,
                 owner=context.username,
                 description=description,
+                anti_snipe=request.anti_snipe,
             )
             applied = self._replicator.submit(command, request.client_id, request.seq)
         return auction_pb2.CreateAuctionResponse(
@@ -224,6 +225,8 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
             if auction is not None:
                 item = auction["item"]
                 owner = auction["owner"]
+                anti_snipe = auction.get("anti_snipe", False)
+                extensions = auction.get("extensions", 0)
                 close_time = auction["close_time"]
                 description = auction["description"]
                 closed = auction["closed"]
@@ -262,6 +265,8 @@ class AuctionServicer(auction_pb2_grpc.AuctionServiceServicer):
             description=description,
             summary=summary,
             owner=owner,
+            anti_snipe=anti_snipe,
+            extensions=extensions,
         )
         return auction_pb2.GetAuctionResponse(
             result=auction_pb2.Result(success=True, reason="ok"),

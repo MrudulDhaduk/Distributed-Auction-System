@@ -339,15 +339,17 @@ background.
 - **Raft mode** (switch in the Cluster header): **Classic Raft** or
   **PreVote**. See [PreVote](#prevote-classic-raft-vs-the-improvement) below.
 - **New auction**. Item, duration (30 s to 1 h, or custom 15 s to 30 days),
-  and optional attributes. With attributes, the leader asks the LLM to write
-  the description before it proposes the auction.
+  optional attributes, and **Anti-sniping**. With attributes, the leader asks
+  the LLM to write the description before it proposes the auction.
 - **Auctions**. One card per auction: seller (marked `YOU` on your own),
   description, high bid, countdown and bar, the latest bids, the bid form,
   and after the close the winner, the summary and the escrow state. After the
   close the winner gets **Pay ... into escrow**, and once it is paid the
-  seller gets **Release to me** and **Refund the winner**. **Ask assistant**
-  opens that auction's own assistant (see step 6); the seller also gets
-  **Edit description**. Filters: All / Open / Closed / Mine.
+  seller gets **Release to me** and **Refund the winner**. An anti-sniping
+  auction shows `anti-sniping`, or `extended ×N` once late bids have moved
+  its close. **Ask assistant** opens that auction's own assistant (see step
+  6); the seller also gets **Edit description**. Filters: All / Open / Closed
+  / Mine.
 - **Users** and **Events**. Every account, and a log of kills, elections,
   new leaders, users, auctions, bids, closes, summaries and escrow changes.
 - **Scenarios** (under the cluster). Three buttons that start a predefined run
@@ -425,6 +427,17 @@ How it is built: `RequestVote` has a `preVote` flag (`proto/raft.proto`); a
 node answering a pre-vote changes no state (`raft/node.py`
 `_answer_prevote`); `StatusService.SetPreVote` switches a node at run time;
 `python -m server.serve --prevote` starts a node with it on.
+
+### Anti-sniping
+
+Tick **Anti-sniping** when creating an auction. A bid that arrives in the
+last 10 s moves the close to 10 s after that bid, at most 5 times per
+auction. It is decided inside `apply()` from the bid's own timestamp (stamped
+by the leader), so every replica extends the same auction to the same time;
+the closer reads the current close time, so it waits for the new one. The
+bid's answer says so (`Bid of 150 added; late bid, closing time extended
+(1/5)`). Measured: a bid 3 s before the close moved it by 7 s. Tests:
+`tests/test_validation_rules.py`.
 
 ### Payments from the page
 
@@ -581,7 +594,7 @@ refused bidder must really be the seller). Tests:
   (for example `test_workload.py`, `test_failover_grpc.py`,
   `test_serve_grpc.py`, `test_harness.py`). Don't run the suite during a chaos
   run (testing-and-chaos.md Known gaps 13).
-- Last full run (2026-11-18, after partitions): 783 passed, 3 xfailed. The 3 xfails are strict xfails: the
+- Last full run (2026-11-18, after anti-sniping): 788 passed, 3 xfailed. The 3 xfails are strict xfails: the
   persistence tests run against MemoryStorage, to prove those tests can fail
   (decisions.md P13).
 - `pytest.ini` sets `--capture=sys`. With pytest's default capture a gRPC log
@@ -726,9 +739,11 @@ there.
   chaos workload does read now: payers read `GetAuction`, sellers `GetEscrow`.)
 - **The peer port is plain TCP with no auth.** Session tokens are stored in
   plain text in `log.bin` ([auction-on-raft.md](docs/auction-on-raft.md) §15).
-- **Not built from the problem statement:** an `ExtendAuction` command (the
-  anti-snipe stretch goal). The terminal dashboard shows a state digest rather
-  than each node's high bid.
+- **Anti-sniping is a rule inside `PlaceBid`, not a separate `ExtendAuction`
+  command,** and it is opt-in per auction (the chaos workload and the
+  scenarios do not use it: their bidders bid until the close, so it would
+  keep extending up to the cap). The terminal dashboard shows a state digest
+  rather than each node's high bid.
 - **Logs from before the validation rules replay differently.** The seller
   rule and the create checks are in `apply()`, so a `data\` directory written
   earlier, in which a seller bid on their own auction, now replays that bid as

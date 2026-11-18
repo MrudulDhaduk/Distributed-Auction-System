@@ -24,6 +24,9 @@ class CreateAuction:
     # ordering note. "" when no attributes were supplied or the LLM call
     # failed; an outage must never block auction creation.
     description: str
+    # Anti-sniping (opt-in): a bid in the last SNIPE_WINDOW moves the close
+    # to SNIPE_WINDOW after that bid, at most SNIPE_MAX_EXTENSIONS times.
+    anti_snipe: bool = False
 
 
 @dataclass(frozen=True)
@@ -212,6 +215,11 @@ def summary_rejection(auction, summary=None):
 
 ITEM_MAX_CHARS = 100
 
+# Anti-sniping. Decided inside apply() from the bid's own curr_time (stamped
+# by the leader), so every replica extends the same auction to the same time.
+SNIPE_WINDOW = datetime.timedelta(seconds=10)
+SNIPE_MAX_EXTENSIONS = 5
+
 
 def create_rejection(auction_id: int, item: str, owner: str):
     """Why this CreateAuction may not be applied (apart from a duplicate id,
@@ -292,6 +300,8 @@ class AuctionState:
                     "closed": False,
                     "winner": None,
                     "closed_at": None,
+                    "anti_snipe": command.anti_snipe,
+                    "extensions": 0,
                 }
                 return Result(success=True, reason=f"Auction created successfully by {command.owner}")
 
@@ -328,6 +338,18 @@ class AuctionState:
                 )
 
                 auction["bids"].append(bid)
+                if (
+                    auction.get("anti_snipe")
+                    and auction["close_time"] - command.curr_time < SNIPE_WINDOW
+                    and auction.get("extensions", 0) < SNIPE_MAX_EXTENSIONS
+                ):
+                    auction["close_time"] = command.curr_time + SNIPE_WINDOW
+                    auction["extensions"] = auction.get("extensions", 0) + 1
+                    return Result(
+                        success=True,
+                        reason=f"Bid of {command.amount} added; late bid, closing time extended "
+                               f"({auction['extensions']}/{SNIPE_MAX_EXTENSIONS})",
+                    )
                 return Result(success=True, reason=(f"Bid of {command.amount} added"))
 
             if isinstance(command, CloseAuction):

@@ -363,3 +363,8 @@ input.invalid { border-color: var(--bad); box-shadow: 0 0 0 3px color-mix(in srg
 .net-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
 .net-state { font-size: 12px; font-weight: 600; color: var(--ok); }
 .net-state.bad { color: var(--bad); }
+
+/* --- anti-sniping --- */
+.check-row { display: flex !important; flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--text) !important; }
+.check-row input { width: auto; }
+.snipe { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); margin-left: 4px; }

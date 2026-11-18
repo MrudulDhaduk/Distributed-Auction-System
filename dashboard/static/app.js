@@ -599,7 +599,7 @@ function setupCreateForm() {
       note.textContent = "Creating…";
       note.className = "form-note";
       try {
-        const r = await api("/api/auctions", { item, duration_seconds: seconds, attributes });
+        const r = await api("/api/auctions", { item, duration_seconds: seconds, attributes, anti_snipe: form.anti_snipe.checked });
         note.textContent = `Created auction #${r.auction_id}`; note.className = "form-note ok";
         toast(`Created auction #${r.auction_id}: ${item}`, "ok");
         form.item.value = "";
@@ -790,6 +790,7 @@ function updateAuctionCard(ref, a) {
   ref.seller.innerHTML = "";
   ref.seller.append("seller ", el("b", null, a.owner));
   if (mine) ref.seller.appendChild(el("span", "you", "YOU"));
+  if (a.anti_snipe) ref.seller.appendChild(el("span", "snipe", a.extensions ? `extended ×${a.extensions}` : "anti-sniping"));
   ref.desc.textContent = a.description || "";
   const high = a.high_bid;
   ref.price.innerHTML = "";

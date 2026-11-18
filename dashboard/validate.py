@@ -109,7 +109,10 @@ def new_auction(obj) -> dict:
         attributes[key] = value
     if len(attributes) > ATTRIBUTES_MAX:
         raise Invalid(f"At most {ATTRIBUTES_MAX} attributes", "attributes")
-    return {"item": item, "duration_seconds": duration, "attributes": attributes}
+    anti_snipe = obj.get("anti_snipe", False)
+    if not isinstance(anti_snipe, bool):
+        raise Invalid("Anti-sniping must be on or off", "anti_snipe")
+    return {"item": item, "duration_seconds": duration, "attributes": attributes, "anti_snipe": anti_snipe}
 
 
 def bid(obj) -> dict:

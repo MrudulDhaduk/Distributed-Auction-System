@@ -353,6 +353,7 @@ class Dashboard:
             "high_bid": top["amount"] if top else 0, "high_bidder": top["bidder"] if top else "",
             "bids": bids, "escrow": a["escrow"],
             "summary": a["summaries"][0] if a["summaries"] else "",
+            "anti_snipe": a.get("anti_snipe", False), "extensions": a.get("extensions", 0),
         }
 
     def _state_events(self, auctions, users):
@@ -607,7 +608,8 @@ class Dashboard:
                 auction_id = self._next_auction_id
             with s.lock:
                 r = s.client.create_auction(auction_id, req["item"], time_conv.dt_to_micros(close),
-                                            attributes=req["attributes"] or None)
+                                            attributes=req["attributes"] or None,
+                                            anti_snipe=req["anti_snipe"])
             if r.result.success:
                 return {"ok": True, "auction_id": auction_id, "message": r.result.reason}
             if not r.result.reason.startswith("ID already exists"):

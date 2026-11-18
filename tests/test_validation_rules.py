@@ -309,7 +309,7 @@ def test_dashboard_create_validation(payload, field):
 
 def test_dashboard_create_drops_empty_attribute_rows():
     v = validate.new_auction({"item": " clock ", "duration_seconds": 60, "attributes": {" brand ": " Seiko ", "": ""}})
-    assert v == {"item": "clock", "duration_seconds": 60, "attributes": {"brand": "Seiko"}}
+    assert v == {"item": "clock", "duration_seconds": 60, "attributes": {"brand": "Seiko"}, "anti_snipe": False}
 
 
 def test_dashboard_registration_validation():
@@ -436,3 +436,59 @@ def test_a_scenario_runs_end_to_end_without_a_cluster_and_reports():
     assert v["state"] == "running" and v["duration"] == 60 and v["faults"] and v["seed"] == 5
     assert v["stats"]["writes"] == 0 and v["report"] is None
     assert set(SCENARIOS) == {"clock", "demo", "chaos"}
+
+
+# --- anti-sniping (opt-in per auction) ------------------------------------------
+
+
+def snipe_auction(anti_snipe=True):
+    from auction.state import CloseAuction  # noqa: F401
+    s = AuctionState()
+    assert s.apply(CreateAuction(1, "clock", LATER, "nisarg", "", anti_snipe=anti_snipe)).success
+    return s
+
+
+def test_a_late_bid_extends_the_close_by_the_window():
+    from auction.state import SNIPE_WINDOW
+    s = snipe_auction()
+    late = LATER - datetime.timedelta(seconds=4)
+    r = s.apply(PlaceBid(1, "karan", 100, late))
+    assert r.success and "extended (1/5)" in r.reason
+    assert s.auctions[1]["close_time"] == late + SNIPE_WINDOW and s.auctions[1]["extensions"] == 1
+
+
+def test_an_early_bid_does_not_extend():
+    s = snipe_auction()
+    assert s.apply(PlaceBid(1, "karan", 100, LATER - datetime.timedelta(seconds=30))).reason == "Bid of 100 added"
+    assert s.auctions[1]["close_time"] == LATER and s.auctions[1]["extensions"] == 0
+
+
+def test_extensions_stop_at_the_cap():
+    from auction.state import SNIPE_MAX_EXTENSIONS, SNIPE_WINDOW
+    s = snipe_auction()
+    amount = 100
+    for i in range(SNIPE_MAX_EXTENSIONS + 3):
+        t = s.auctions[1]["close_time"] - datetime.timedelta(seconds=1)
+        assert s.apply(PlaceBid(1, "karan" if i % 2 else "mrudul", amount, t)).success
+        amount += 10
+    assert s.auctions[1]["extensions"] == SNIPE_MAX_EXTENSIONS
+    final = s.auctions[1]["close_time"]
+    assert s.apply(PlaceBid(1, "karan", amount + 100, final + datetime.timedelta(seconds=1))).reason.startswith("Time is up")
+    assert final > LATER and final <= LATER + SNIPE_WINDOW * SNIPE_MAX_EXTENSIONS
+
+
+def test_without_anti_sniping_a_late_bid_changes_nothing():
+    s = snipe_auction(anti_snipe=False)
+    assert s.apply(PlaceBid(1, "karan", 100, LATER - datetime.timedelta(seconds=1))).reason == "Bid of 100 added"
+    assert s.auctions[1]["close_time"] == LATER
+
+
+def test_the_extension_is_the_same_on_every_replica_after_replay():
+    log = [codec.encode(CreateAuction(1, "clock", LATER, "nisarg", "", anti_snipe=True), "c1", 1),
+           codec.encode(PlaceBid(1, "karan", 100, LATER - datetime.timedelta(seconds=2)), "c2", 1),
+           codec.encode(PlaceBid(1, "mrudul", 150, LATER + datetime.timedelta(seconds=5)), "c3", 1)]
+    replicas = [StateMachine() for _ in range(3)]
+    for sm in replicas:
+        assert [sm.apply_fn(i, d).result.success for i, d in enumerate(log, 1)] == [True, True, True]
+        assert sm.auctions.auctions[1]["extensions"] == 2
+    assert len({digest.state_digest(sm.snapshot()) for sm in replicas}) == 1

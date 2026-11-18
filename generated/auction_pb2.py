@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rauction.proto\x12\x07\x61uction\")\n\x06Result\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\"U\n\x0fRegisterRequest\x12\x10\n\x08username\x18\x01 \x01(\t\x12\x10\n\x08password\x18\x02 \x01(\t\x12\x11\n\tclient_id\x18\x03 \x01(\t\x12\x0b\n\x03seq\x18\x04 \x01(\x04\"3\n\x10RegisterResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\"R\n\x0cLoginRequest\x12\x10\n\x08username\x18\x01 \x01(\t\x12\x10\n\x08password\x18\x02 \x01(\t\x12\x11\n\tclient_id\x18\x03 \x01(\t\x12\x0b\n\x03seq\x18\x04 \x01(\x04\"?\n\rLoginResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\x12\r\n\x05token\x18\x02 \x01(\t\"/\n\rLogoutRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\x04\"1\n\x0eLogoutResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\"\xf7\x01\n\x14\x43reateAuctionRequest\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0c\n\x04item\x18\x02 \x01(\t\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x13\n\x0b\x64\x65scription\x18\x04 \x01(\t\x12\x41\n\nattributes\x18\x05 \x03(\x0b\x32-.auction.CreateAuctionRequest.AttributesEntry\x12\x11\n\tclient_id\x18\x06 \x01(\t\x12\x0b\n\x03seq\x18\x07 \x01(\x04\x1a\x31\n\x0f\x41ttributesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"L\n\x15\x43reateAuctionResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\x12\x12\n\nauction_id\x18\x02 \x01(\x03\"U\n\x0fPlaceBidRequest\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0e\n\x06\x61mount\x18\x02 \x01(\x03\x12\x11\n\tclient_id\x18\x03 \x01(\t\x12\x0b\n\x03seq\x18\x04 \x01(\x04\"j\n\x10PlaceBidResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\x12\x18\n\x10\x63urrent_high_bid\x18\x02 \x01(\x03\x12\x1b\n\x13\x63urrent_high_bidder\x18\x03 \x01(\t\"\'\n\x11GetAuctionRequest\x12\x12\n\nauction_id\x18\x01 \x01(\x03\"X\n\x12GetAuctionResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\x12!\n\x07\x61uction\x18\x02 \x01(\x0b\x32\x10.auction.Auction\"-\n\x13ListAuctionsRequest\x12\x16\n\x0einclude_closed\x18\x01 \x01(\x08\"A\n\x14ListAuctionsResponse\x12)\n\x08\x61uctions\x18\x01 \x03(\x0b\x32\x17.auction.AuctionSummary\"\xe7\x01\n\x07\x41uction\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0c\n\x04item\x18\x02 \x01(\t\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x0e\n\x06\x63losed\x18\x04 \x01(\x08\x12\x18\n\x10\x63urrent_high_bid\x18\x05 \x01(\x03\x12\x1b\n\x13\x63urrent_high_bidder\x18\x06 \x01(\t\x12\x1a\n\x04\x62ids\x18\x07 \x03(\x0b\x32\x0c.auction.Bid\x12\x0e\n\x06winner\x18\x08 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\t \x01(\t\x12\x0f\n\x07summary\x18\n \x01(\t\x12\r\n\x05owner\x18\x0b \x01(\t\"3\n\x03\x42id\x12\x0e\n\x06\x62idder\x18\x01 \x01(\t\x12\x0e\n\x06\x61mount\x18\x02 \x01(\x03\x12\x0c\n\x04time\x18\x03 \x01(\x03\"\x7f\n\x0e\x41uctionSummary\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0c\n\x04item\x18\x02 \x01(\t\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x0e\n\x06\x63losed\x18\x04 \x01(\x08\x12\x18\n\x10\x63urrent_high_bid\x18\x05 \x01(\x03\x12\r\n\x05owner\x18\x06 \x01(\t2\xc1\x01\n\x0b\x41uthService\x12\x36\n\x05Login\x12\x15.auction.LoginRequest\x1a\x16.auction.LoginResponse\x12\x39\n\x06Logout\x12\x16.auction.LogoutRequest\x1a\x17.auction.LogoutResponse\x12?\n\x08Register\x12\x18.auction.RegisterRequest\x1a\x19.auction.RegisterResponse2\xb5\x02\n\x0e\x41uctionService\x12N\n\rCreateAuction\x12\x1d.auction.CreateAuctionRequest\x1a\x1e.auction.CreateAuctionResponse\x12?\n\x08PlaceBid\x12\x18.auction.PlaceBidRequest\x1a\x19.auction.PlaceBidResponse\x12\x45\n\nGetAuction\x12\x1a.auction.GetAuctionRequest\x1a\x1b.auction.GetAuctionResponse\x12K\n\x0cListAuctions\x12\x1c.auction.ListAuctionsRequest\x1a\x1d.auction.ListAuctionsResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rauction.proto\x12\x07\x61uction\")\n\x06Result\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0e\n\x06reason\x18\x02 \x01(\t\"U\n\x0fRegisterRequest\x12\x10\n\x08username\x18\x01 \x01(\t\x12\x10\n\x08password\x18\x02 \x01(\t\x12\x11\n\tclient_id\x18\x03 \x01(\t\x12\x0b\n\x03seq\x18\x04 \x01(\x04\"3\n\x10RegisterResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\"R\n\x0cLoginRequest\x12\x10\n\x08username\x18\x01 \x01(\t\x12\x10\n\x08password\x18\x02 \x01(\t\x12\x11\n\tclient_id\x18\x03 \x01(\t\x12\x0b\n\x03seq\x18\x04 \x01(\x04\"?\n\rLoginResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\x12\r\n\x05token\x18\x02 \x01(\t\"/\n\rLogoutRequest\x12\x11\n\tclient_id\x18\x01 \x01(\t\x12\x0b\n\x03seq\x18\x02 \x01(\x04\"1\n\x0eLogoutResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\"\x8b\x02\n\x14\x43reateAuctionRequest\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0c\n\x04item\x18\x02 \x01(\t\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x13\n\x0b\x64\x65scription\x18\x04 \x01(\t\x12\x41\n\nattributes\x18\x05 \x03(\x0b\x32-.auction.CreateAuctionRequest.AttributesEntry\x12\x11\n\tclient_id\x18\x06 \x01(\t\x12\x0b\n\x03seq\x18\x07 \x01(\x04\x12\x12\n\nanti_snipe\x18\x08 \x01(\x08\x1a\x31\n\x0f\x41ttributesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"L\n\x15\x43reateAuctionResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\x12\x12\n\nauction_id\x18\x02 \x01(\x03\"U\n\x0fPlaceBidRequest\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0e\n\x06\x61mount\x18\x02 \x01(\x03\x12\x11\n\tclient_id\x18\x03 \x01(\t\x12\x0b\n\x03seq\x18\x04 \x01(\x04\"j\n\x10PlaceBidResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\x12\x18\n\x10\x63urrent_high_bid\x18\x02 \x01(\x03\x12\x1b\n\x13\x63urrent_high_bidder\x18\x03 \x01(\t\"\'\n\x11GetAuctionRequest\x12\x12\n\nauction_id\x18\x01 \x01(\x03\"X\n\x12GetAuctionResponse\x12\x1f\n\x06result\x18\x01 \x01(\x0b\x32\x0f.auction.Result\x12!\n\x07\x61uction\x18\x02 \x01(\x0b\x32\x10.auction.Auction\"-\n\x13ListAuctionsRequest\x12\x16\n\x0einclude_closed\x18\x01 \x01(\x08\"A\n\x14ListAuctionsResponse\x12)\n\x08\x61uctions\x18\x01 \x03(\x0b\x32\x17.auction.AuctionSummary\"\x8f\x02\n\x07\x41uction\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0c\n\x04item\x18\x02 \x01(\t\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x0e\n\x06\x63losed\x18\x04 \x01(\x08\x12\x18\n\x10\x63urrent_high_bid\x18\x05 \x01(\x03\x12\x1b\n\x13\x63urrent_high_bidder\x18\x06 \x01(\t\x12\x1a\n\x04\x62ids\x18\x07 \x03(\x0b\x32\x0c.auction.Bid\x12\x0e\n\x06winner\x18\x08 \x01(\t\x12\x13\n\x0b\x64\x65scription\x18\t \x01(\t\x12\x0f\n\x07summary\x18\n \x01(\t\x12\r\n\x05owner\x18\x0b \x01(\t\x12\x12\n\nanti_snipe\x18\x0c \x01(\x08\x12\x12\n\nextensions\x18\r \x01(\x05\"3\n\x03\x42id\x12\x0e\n\x06\x62idder\x18\x01 \x01(\t\x12\x0e\n\x06\x61mount\x18\x02 \x01(\x03\x12\x0c\n\x04time\x18\x03 \x01(\x03\"\x7f\n\x0e\x41uctionSummary\x12\x12\n\nauction_id\x18\x01 \x01(\x03\x12\x0c\n\x04item\x18\x02 \x01(\t\x12\x12\n\nclose_time\x18\x03 \x01(\x03\x12\x0e\n\x06\x63losed\x18\x04 \x01(\x08\x12\x18\n\x10\x63urrent_high_bid\x18\x05 \x01(\x03\x12\r\n\x05owner\x18\x06 \x01(\t2\xc1\x01\n\x0b\x41uthService\x12\x36\n\x05Login\x12\x15.auction.LoginRequest\x1a\x16.auction.LoginResponse\x12\x39\n\x06Logout\x12\x16.auction.LogoutRequest\x1a\x17.auction.LogoutResponse\x12?\n\x08Register\x12\x18.auction.RegisterRequest\x1a\x19.auction.RegisterResponse2\xb5\x02\n\x0e\x41uctionService\x12N\n\rCreateAuction\x12\x1d.auction.CreateAuctionRequest\x1a\x1e.auction.CreateAuctionResponse\x12?\n\x08PlaceBid\x12\x18.auction.PlaceBidRequest\x1a\x19.auction.PlaceBidResponse\x12\x45\n\nGetAuction\x12\x1a.auction.GetAuctionRequest\x1a\x1b.auction.GetAuctionResponse\x12K\n\x0cListAuctions\x12\x1c.auction.ListAuctionsRequest\x1a\x1d.auction.ListAuctionsResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -48,31 +48,31 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_LOGOUTRESPONSE']._serialized_start=407
   _globals['_LOGOUTRESPONSE']._serialized_end=456
   _globals['_CREATEAUCTIONREQUEST']._serialized_start=459
-  _globals['_CREATEAUCTIONREQUEST']._serialized_end=706
-  _globals['_CREATEAUCTIONREQUEST_ATTRIBUTESENTRY']._serialized_start=657
-  _globals['_CREATEAUCTIONREQUEST_ATTRIBUTESENTRY']._serialized_end=706
-  _globals['_CREATEAUCTIONRESPONSE']._serialized_start=708
-  _globals['_CREATEAUCTIONRESPONSE']._serialized_end=784
-  _globals['_PLACEBIDREQUEST']._serialized_start=786
-  _globals['_PLACEBIDREQUEST']._serialized_end=871
-  _globals['_PLACEBIDRESPONSE']._serialized_start=873
-  _globals['_PLACEBIDRESPONSE']._serialized_end=979
-  _globals['_GETAUCTIONREQUEST']._serialized_start=981
-  _globals['_GETAUCTIONREQUEST']._serialized_end=1020
-  _globals['_GETAUCTIONRESPONSE']._serialized_start=1022
-  _globals['_GETAUCTIONRESPONSE']._serialized_end=1110
-  _globals['_LISTAUCTIONSREQUEST']._serialized_start=1112
-  _globals['_LISTAUCTIONSREQUEST']._serialized_end=1157
-  _globals['_LISTAUCTIONSRESPONSE']._serialized_start=1159
-  _globals['_LISTAUCTIONSRESPONSE']._serialized_end=1224
-  _globals['_AUCTION']._serialized_start=1227
-  _globals['_AUCTION']._serialized_end=1458
-  _globals['_BID']._serialized_start=1460
-  _globals['_BID']._serialized_end=1511
-  _globals['_AUCTIONSUMMARY']._serialized_start=1513
-  _globals['_AUCTIONSUMMARY']._serialized_end=1640
-  _globals['_AUTHSERVICE']._serialized_start=1643
-  _globals['_AUTHSERVICE']._serialized_end=1836
-  _globals['_AUCTIONSERVICE']._serialized_start=1839
-  _globals['_AUCTIONSERVICE']._serialized_end=2148
+  _globals['_CREATEAUCTIONREQUEST']._serialized_end=726
+  _globals['_CREATEAUCTIONREQUEST_ATTRIBUTESENTRY']._serialized_start=677
+  _globals['_CREATEAUCTIONREQUEST_ATTRIBUTESENTRY']._serialized_end=726
+  _globals['_CREATEAUCTIONRESPONSE']._serialized_start=728
+  _globals['_CREATEAUCTIONRESPONSE']._serialized_end=804
+  _globals['_PLACEBIDREQUEST']._serialized_start=806
+  _globals['_PLACEBIDREQUEST']._serialized_end=891
+  _globals['_PLACEBIDRESPONSE']._serialized_start=893
+  _globals['_PLACEBIDRESPONSE']._serialized_end=999
+  _globals['_GETAUCTIONREQUEST']._serialized_start=1001
+  _globals['_GETAUCTIONREQUEST']._serialized_end=1040
+  _globals['_GETAUCTIONRESPONSE']._serialized_start=1042
+  _globals['_GETAUCTIONRESPONSE']._serialized_end=1130
+  _globals['_LISTAUCTIONSREQUEST']._serialized_start=1132
+  _globals['_LISTAUCTIONSREQUEST']._serialized_end=1177
+  _globals['_LISTAUCTIONSRESPONSE']._serialized_start=1179
+  _globals['_LISTAUCTIONSRESPONSE']._serialized_end=1244
+  _globals['_AUCTION']._serialized_start=1247
+  _globals['_AUCTION']._serialized_end=1518
+  _globals['_BID']._serialized_start=1520
+  _globals['_BID']._serialized_end=1571
+  _globals['_AUCTIONSUMMARY']._serialized_start=1573
+  _globals['_AUCTIONSUMMARY']._serialized_end=1700
+  _globals['_AUTHSERVICE']._serialized_start=1703
+  _globals['_AUTHSERVICE']._serialized_end=1896
+  _globals['_AUCTIONSERVICE']._serialized_start=1899
+  _globals['_AUCTIONSERVICE']._serialized_end=2208
 # @@protoc_insertion_point(module_scope)
