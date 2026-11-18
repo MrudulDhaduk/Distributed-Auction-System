@@ -6,10 +6,9 @@
 
 | Team member | ID | Primary responsibility |
 | --- | --- | --- |
-| *[Name]* | *[ID]* | Application server, auction logic, Raft |
-| *[Name]* | *[ID]* | Client tooling, LLM server, evaluation harness |
+| *Dhaduk Mrudul* | *2026H1030069P* | Application server, auction logic, Raft |
+| *Nisarg Vagh* | *2026H1030066P* | Client tooling, LLM server, evaluation harness, Docker |
 
-> **Team size note.** We are currently a two-member team and are seeking the Instructor-in-charge's approval to proceed at this size. Scope below is planned for two members; we will expand the stretch goals in §8 if a third member joins.
 
 ---
 

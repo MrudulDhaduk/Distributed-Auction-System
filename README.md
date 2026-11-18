@@ -1,4 +1,4 @@
-# Distributed Auction System
+# GroundHog: Distributed Auction System
 
 An online auction (log in, create an auction, bid, automatic close, one winner)
 replicated across three servers with **Raft, implemented from the paper**
@@ -13,13 +13,6 @@ Built for CS G623 (Advanced Operating Systems). It ships with a seeded chaos
 harness and a property checker that tests the guarantees on real processes.
 Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirements-audit.md).
 
-**Want to see it working?** Run `docker compose up --build` (see
-[Run it with Docker](#run-it-with-docker-groundhog)) or
-`.venv\Scripts\python.exe -m dashboard --open`, and follow
-[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard): a
-browser dashboard that starts the cluster, shows every replica and its heartbeats live,
-and lets you kill nodes, create users and auctions, bid, and ask each auction's assistant.
-
 **Who wrote what.** The M1 code (`auction/state.py`'s `apply()` and commands,
 gRPC, auth and sessions, the closer, the LLM server) was written by the author.
 Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`). The M2 code (Raft,
@@ -29,117 +22,10 @@ review: each chunk was studied, discussed and committed by the author.
 
 ---
 
-## Architecture
+## Quick start
 
-```mermaid
-flowchart LR
-    subgraph Clients
-        C1[ClusterClient<br/>client/auction_client.py]
-        H[chaos harness / demo<br/>scripts/chaos.py, demo.py]
-        D[terminal dashboard<br/>scripts/dashboard.py]
-        W[web dashboard<br/>python -m dashboard<br/>http://127.0.0.1:8765]
-    end
-
-    subgraph N1["node n1 (python -m server.serve)"]
-        direction TB
-        A1["client port 5007x<br/>AuthInterceptor → Auth + Auction handlers<br/>server/"]
-        R1["replication/<br/>codec, StateMachine.apply_fn,<br/>§8 dedupe, read barrier"]
-        S1["auction/state.py apply()<br/>sessions/state.py"]
-        K1["raft/node.py RaftNode<br/>election, log, commit, applier"]
-        F1[("raft/file_storage.py<br/>data/n1: state.json + log.bin<br/>fsync before reply")]
-        P1["peer port 5006x<br/>RaftService + StatusService"]
-        A1 -- "propose / read_index" --> R1 --> K1
-        K1 -- "apply_fn(committed entry)" --> R1 --> S1
-        K1 --- F1
-        P1 --- K1
-    end
-
-    N2["node n2 (same)"]
-    N3["node n3 (same)"]
-    L["LLM server :50052<br/>llm_server/ (Ollama)"]
-    G["mock payment gateway<br/>in-process stub, server/payment_gateway.py"]
-
-    C1 -- "gRPC + token<br/>redirect to leader" --> A1
-    H --> A1
-    D -- "GetNodeStatus" --> P1
-    W -- "GetNodeStatus, DumpState" --> P1
-    W -- "ClusterClient: login, register,<br/>create, bid, ask" --> A1
-    P1 <-- "RequestVote / AppendEntries" --> N2
-    P1 <-- "RequestVote / AppendEntries" --> N3
-    A1 -- "leader only, deadline 25 s" --> L
-    A1 -- "leader only, before proposing" --> G
-```
-
-- **Client port** (50071-50073): `AuthService`, `AuctionService`,
-  `PaymentService` and `AssistantService` behind a session-token interceptor.
-  A follower answers "not leader, try *there*".
-- **Peer port** (50061-50063): `RaftService` (the two Raft RPCs) and
-  `StatusService` (read-only status for the dashboard and checker). It has no
-  auth (decisions.md A9, T2).
-- **Write path:** handler → `propose()` → leader's log → majority → commit →
-  `apply()` on every node → reply. Walkthrough:
-  [docs/auction-on-raft.md](docs/auction-on-raft.md) §2.
-- **Reads** are served only by the leader, after a read-index round
-  (decisions.md A14, A15).
-
----
-
-## Run it with Docker (GroundHog)
-
-The quickest way to run everything, on any machine with Docker Desktop: no
-Python, venv or Ollama install needed.
-
-```powershell
-docker compose up --build        # first time: builds the image, downloads the model (~2.5 GB, once)
-```
-
-Open **http://localhost:8765** and follow
-[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard).
-`docker compose down` stops everything; the model stays cached for next time.
-
-| container | what runs in it |
-|---|---|
-| `ollama` | the model server, `ollama/ollama:0.34.4` (CPU); models in the volume `groundhog-ollama-models` |
-| `model` | one-shot: pulls `qwen3:4b-instruct-2507-q4_K_M` into that volume, then exits |
-| `auction` | image `groundhog:local` (Python 3.11): the web dashboard, the LLM server and the Raft nodes n1, n2, n3 as separate processes |
-
-The nodes are processes inside one container, not one container each, on
-purpose: the dashboard starts them itself, so **Kill -9, Suspend, Resume and
-Restart work exactly as without Docker** (on Linux they are SIGKILL, SIGSTOP
-and SIGCONT). Node logs, scenario results and replays are written to `runs\`
-on your machine (a bind mount).
-
-Variations:
-
-```powershell
-$env:DASHBOARD_PORT=8770; docker compose up --build                 # 8765 is taken
-$env:DASHBOARD_LLM="fake"; docker compose up --build auction --no-deps   # canned answers, no model download
-docker compose run --rm auction python -m pytest -q                 # the test suite, on Linux
-```
-
-Measured on 2026-11-18 (Docker Desktop 29.9.2 on the dev laptop):
-
-- The full dashboard check (three leader kills, a cut link, an isolated
-  leader, Classic vs PreVote, a Vintage clock scenario with a kill and a
-  partition) passed in the container, 10/10 checker properties, never two
-  leaders in one term.
-- Failover is faster on Linux: a new leader about **0.63 s** after a kill
-  (1.2-1.6 s on Windows) and the first bid after it in 0.1-0.2 s, because
-  Linux refuses a connection to a dead port at once instead of after 2 s.
-- The real model works through the containers but is slower: about 6-7 s per
-  answer, against 1-2 s with Ollama on Windows, since Docker Desktop gives the
-  model only part of the CPU.
-- The test suite in the container: 780 passed, 11 skipped (Windows-only
-  process tests), 3 xfailed.
-- `docker stop` stops the dashboard and the nodes it started cleanly (exit 0,
-  about 1 s).
-
----
-
-## Environment (PowerShell): setup
-
-Bare `python` on this machine may resolve to a different install (miniforge),
-so every command below uses the venv's interpreter explicitly.
+**1. Setup (once, PowerShell).** Every command uses the venv's own Python,
+because a bare `python` may be a different install.
 
 ```powershell
 git clone https://github.com/MrudulDhaduk/Distributed-Auction-System
@@ -148,187 +34,29 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-`requirements.txt` pins `grpcio` and `grpcio-tools` to 1.83.0 and adds
-`pytest`, `rich` (dashboard) and `ollama` (LLM server). It was developed on
-Python 3.13.13.
-
-**The LLM.** Install [Ollama](https://ollama.com/download), then pull the
-model (about 2.5 GB, runs on the CPU) and start the LLM server, which is its
-own process on port 50052:
+**2. The model.** Install [Ollama](https://ollama.com/download) and pull the
+model once (about 2.5 GB, runs on the CPU):
 
 ```powershell
 ollama pull qwen3:4b-instruct-2507-q4_K_M
-.venv\Scripts\python.exe -m llm_server.serve                 # the LLM server (model name is in llm_server\config.py)
-.venv\Scripts\python.exe scripts\llm_rpc_smoke.py            # one call per job, to check it works on its own
 ```
 
-`run_cluster.ps1` and `demo.ps1` start the LLM server for you. The first call
-after Ollama loads the model took 15.75 s on the dev machine; later calls took
-1 to 7 s. Every call the nodes make carries a 25 s deadline.
+Without Ollama everything still runs: descriptions come out empty and the
+assistant answers that it is unavailable, and the auctions are unaffected.
 
-Without Ollama the system still runs. A description at creation degrades to
-`""`, and the assistant calls return a clear "the assistant is unavailable ...;
-the auction is unaffected" answer (decisions.md C12, C13;
-[docs/design-notes.md](docs/design-notes.md) explains the model choice).
-**The recorded demo run used the real model** (see "The scripted demo"). **The
-recorded chaos run used a canned-answer LLM server** (`--fake-llm`), not the
-model: a 4B model on the CPU would share cores with Raft's election timers
-(decisions.md C22).
-
-The generated gRPC stubs are committed in `generated\`. After changing a
-`.proto` file, regenerate them:
+**3. Run it.**
 
 ```powershell
-.venv\Scripts\python.exe scripts\gen_proto.py
+.venv\Scripts\python.exe -m dashboard --open
 ```
+
+This starts the LLM server, three Raft nodes and the web dashboard at
+**http://127.0.0.1:8765**. Then follow the [web dashboard](#web-dashboard)
+section below. Prefer containers? See [Run it with Docker](#run-it-with-docker-groundhog).
 
 ---
 
-## Running it
-
-### One node
-
-A cluster of one elects itself and commits on its own vote:
-
-```powershell
-.venv\Scripts\python.exe -m server.serve --node-id n1 --client-port 50071 --peer-port 50061 --data-dir data\solo
-# in a second window:
-.venv\Scripts\python.exe -m client.auction_client --nodes 127.0.0.1:50071
-```
-
-Checked by hand on 2026-11-10, without the LLM: the node logged
-`term 1 CANDIDATE -> LEADER: won election with 1 votes`, then
-`appended no-op at index 1`, and the client flow finished with
-`winner: "mrudul"`. `--data-dir` is required (decisions.md A13).
-
-### A 3-node cluster
-
-```powershell
-.\scripts\run_cluster.ps1            # LLM server + n1, n2, n3, one window each
-.\scripts\run_cluster.ps1 -NoLLM     # same, without the LLM server
-.\scripts\run_cluster.ps1 -DryRun    # print the command lines only
-```
-
-Each node keeps term, vote and log in `data\<id>`. To kill the leader, close
-its window. To restart a node, run its line from `-DryRun`: it replays its log
-from disk, and the leader sends it what it missed.
-
-If `data\` was written before commit `cd8128a` (the time-conversion fix,
-decisions.md T1), wipe it first: `Remove-Item -Recurse data`.
-
-### The client
-
-```powershell
-.venv\Scripts\python.exe -m client.auction_client
-```
-
-It runs the scripted flow: four logins, one auction ("vintage clock", closes in
-25 s), bids of 150 and 200 and an equal 200 that is refused, then it waits for
-the close and prints the final auction. It follows leader redirects and
-retries with the same `(client_id, seq)` (decisions.md A17, A18). Close the
-leader's window mid-run to watch it fail over.
-
-Seeded accounts: `mrudul`, `nisarg`, `karan`, `tanmay`, password `pass`
-(`sessions/users.py`). More accounts can be created at run time with
-`AuthService.Register` (the web dashboard's "Create account" tab, or
-`ClusterClient.register(username, password)`); see [Validation rules](#validation-rules).
-
-### The terminal dashboard
-
-For the browser dashboard see
-[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard).
-The terminal one only watches a cluster that something else started:
-
-```powershell
-.venv\Scripts\python.exe scripts\dashboard.py                    # a run_cluster.ps1 cluster
-.venv\Scripts\python.exe scripts\dashboard.py --base-peer 50081  # a chaos or stress cluster
-```
-
-It shows, per node, the role, term, leader, commitIndex, lastApplied, last log
-entry and state digest, plus one verdict: `agree`, `catching up` or
-`DIVERGED` ([docs/testing-and-chaos.md](docs/testing-and-chaos.md) §2).
-
-### Using it from Python
-
-`ClusterClient` has the handout's functions: `login`, `logout`,
-`post(token, type, data)`, `get(token, type, params)` and
-`process_business_request(request_id, payload, context)`. `post` and `get` use the
-typed RPCs; `process_business_request` calls the server's
-`BusinessService.ProcessBusinessRequest`, which dispatches to the same handlers:
-
-```python
-c = ClusterClient(["127.0.0.1:50071", "127.0.0.1:50072", "127.0.0.1:50073"])
-c.register("alice", "alice123")          # optional: a new, replicated account
-c.login("mrudul", "pass")
-c.post(c.token, "bid", {"auction_id": 1, "amount": 150})
-c.post(c.token, "payment", {"auction_id": 1, "action": "pay", "amount": 150})   # the winner, after the close
-c.get(c.token, "escrow", {"auction_id": 1})
-c.get(c.token, "assistant", {"question": "Can I bid one more?", "auction_id": 1})
-c.get(c.token, "price_trends", {})
-```
-`post` types: `auction`, `bid`, `payment` (`action`: `pay`, `release`, `refund`),
-`description`. `get` types: `auction`, `auctions`, `escrow`, `assistant`,
-`price_trends`. The seller releases or refunds; only the winner pays.
-
-### The scripted demo
-
-```powershell
-.\scripts\demo.ps1 -Pause 4
-```
-
-It opens the dashboard and runs `scripts\demo.py`: start the LLM server and 3
-nodes, warm the model, log in, create four auctions (the LLM writes each
-description), start six background bidders (`bg1`-`bg6`, one client each) that
-bid on auctions 2-4 until they close, race two equal bids on auction 1 (the
-hero), ask the assistant about the live auction, kill -9 the leader **while the
-background bidders are bidding**, keep bidding, restart the dead node, wait for
-the closes (the hero closes last), show the LLM-written result summaries, have
-the winners pay into escrow (the background winners with their own clients),
-kill -9 the leader **again** and read the same escrow from the new leader,
-release and refund the escrow, show price trends and the stall each leader kill
-caused for the background bidders, then run the checker.
-
-Run end to end on 2026-11-10 with the real model (`demo.ps1 -Pause 0.5`, exit
-0, all ten properties PASS, 90.2 s with 0.5 s pauses). Timings printed by that
-run: model warm-up 6.13 s, create auction including the LLM description 1.83 s,
-assistant answer 1.14 s, close to summary visible 5.56 s, price trends 2.28 s.
-At `-Pause 4` the same run is longer by about 3.5 s per step. Minute-by-minute
-script: [docs/demo-runsheet.md](docs/demo-runsheet.md).
-
-Run on 2026-11-10 at `-Pause 4` (the presenting speed), the four-auction demo:
-all ten properties PASS, whole run 147.19 s. The background bidders made 599
-bids (531 accepted, 68 refused, 0 errors); the first leader kill stalled a
-background bid for 2.18 s. Its output and its replay are in
-`runs\demo-20261110-150720` (local only).
-
-Do not run the demo and `run_cluster.ps1` at the same time: they use the same
-ports.
-
-### Replay a demo run
-
-Every demo run writes `runs\demo-<time>\events.jsonl`: one line per step,
-client write, kill, restart, election, close, summary, escrow change and
-checker result, each stamped with its time. The replay turns that file into one
-self-contained HTML page (data, CSS and JavaScript inside it; no server, no
-internet):
-
-```powershell
-.venv\Scripts\python.exe scripts\replay.py runs\demo-<time>
-```
-
-Open `runs\demo-<time>\replay.html` in a browser. Space plays and pauses, the
-left and right arrows jump to the previous or next step, kill, election or
-escrow change, the speed buttons set 0.5x to 5x, and the timeline jumps to any
-marker. Dragging the slider rebuilds the state at that time from the events.
-The page opens with a banner saying it is a replay, so it cannot be mistaken
-for a live system. The end of the run shows the checker's result.
-
-The replay is built by `scripts\replay.py`, and the state is computed there and
-tested in `tests\test_replay.py`. The page only displays it.
-
----
-
-## Walk through the demo yourself (web dashboard)
+## Web dashboard
 
 One command starts the LLM server, three Raft nodes and a web page that shows
 them live and lets you act on them. Everything on the page comes from the
@@ -340,7 +68,7 @@ redirects and retries exactly as any client does.
 ### Start it
 
 ```powershell
-.venv\Scripts\python.exe -m dashboard --open              # real LLM (needs Ollama + the model, see Environment)
+.venv\Scripts\python.exe -m dashboard --open              # real LLM (needs Ollama + the model, see Quick start)
 .venv\Scripts\python.exe -m dashboard --open --llm fake   # canned LLM answers, no Ollama needed
 .venv\Scripts\python.exe -m dashboard --llm none          # no LLM server: no descriptions, the assistant says it is unavailable
 ```
@@ -635,6 +363,182 @@ refused bidder must really be the seller). Tests:
 
 ---
 
+## Running from the terminal
+
+Everything the dashboard does can also be run without a browser. These use
+the same ports as the dashboard, so run one or the other.
+
+**A cluster in separate windows.**
+
+```powershell
+.\scripts\run_cluster.ps1            # LLM server + n1, n2, n3, one window each
+.\scripts\run_cluster.ps1 -NoLLM     # without the LLM server
+.\scripts\run_cluster.ps1 -DryRun    # print the command lines only
+```
+
+Each node keeps its term, vote and log in `data\<id>`. Kill the leader by
+closing its window; restart a node with its line from `-DryRun` and it replays
+its log from disk and catches up.
+
+**The command-line client.**
+
+```powershell
+.venv\Scripts\python.exe -m client.auction_client
+```
+
+Four logins, one auction ("vintage clock", closes in 25 s), bids of 150 and
+200 and an equal 200 that is refused, then the final result. It follows leader
+redirects and retries with the same `(client_id, seq)`, so you can close the
+leader's window mid-run and watch it fail over. Seeded accounts: `mrudul`,
+`nisarg`, `karan`, `tanmay`, password `pass`; more can be registered.
+
+**From Python**, with the handout's client functions (`login`, `logout`,
+`post`, `get`, `process_business_request`):
+
+```python
+c = ClusterClient(["127.0.0.1:50071", "127.0.0.1:50072", "127.0.0.1:50073"])
+c.register("alice", "alice123")          # optional: a new, replicated account
+c.login("mrudul", "pass")
+c.post(c.token, "bid", {"auction_id": 1, "amount": 150})
+c.post(c.token, "payment", {"auction_id": 1, "action": "pay", "amount": 150})   # the winner, after the close
+c.get(c.token, "escrow", {"auction_id": 1})
+c.get(c.token, "assistant", {"question": "Can I bid one more?", "auction_id": 1})
+c.get(c.token, "price_trends", {})
+```
+
+`post` types: `auction`, `bid`, `payment` (`action`: `pay`, `release`,
+`refund`), `description`. `get` types: `auction`, `auctions`, `escrow`,
+`assistant`, `price_trends`. `process_business_request(request_id, payload,
+context)` calls the server's `BusinessService.ProcessBusinessRequest`, which
+dispatches to the same handlers.
+
+**The scripted demo and its replay.**
+
+```powershell
+.\scripts\demo.ps1 -Pause 4
+.venv\Scripts\python.exe scripts\replay.py runs\demo-<time>      # then open runs\demo-<time>\replay.html
+```
+
+The script starts the cluster, creates four auctions, runs six background
+bidders, kills the leader twice under load, settles the escrows, shows price
+trends and runs the checker (all ten properties PASS on 2026-11-10, with the
+real model). Every run is recorded to `events.jsonl`, and `replay.py` turns it
+into one self-contained page with a timeline. Minute-by-minute script:
+[docs/demo-runsheet.md](docs/demo-runsheet.md).
+(`scripts\dashboard.py` is an older terminal view of the same node status.)
+
+**Notes.** The LLM server runs on port 50052; every call from a node carries a
+25 s deadline, and the first call after Ollama loads the model takes about
+15 s. The generated gRPC stubs are committed in `generated\`; after changing
+a `.proto` file run `.venv\Scripts\python.exe scripts\gen_proto.py`.
+
+---
+
+## Run it with Docker (GroundHog)
+
+The quickest way to run everything, on any machine with Docker Desktop: no
+Python, venv or Ollama install needed.
+
+```powershell
+docker compose up --build        # first time: builds the image, downloads the model (~2.5 GB, once)
+```
+
+Open **http://localhost:8765** and follow
+[Web dashboard](#web-dashboard).
+`docker compose down` stops everything; the model stays cached for next time.
+
+| container | what runs in it |
+|---|---|
+| `ollama` | the model server, `ollama/ollama:0.34.4` (CPU); models in the volume `groundhog-ollama-models` |
+| `model` | one-shot: pulls `qwen3:4b-instruct-2507-q4_K_M` into that volume, then exits |
+| `auction` | image `groundhog:local` (Python 3.11): the web dashboard, the LLM server and the Raft nodes n1, n2, n3 as separate processes |
+
+The nodes are processes inside one container, not one container each, on
+purpose: the dashboard starts them itself, so **Kill -9, Suspend, Resume and
+Restart work exactly as without Docker** (on Linux they are SIGKILL, SIGSTOP
+and SIGCONT). Node logs, scenario results and replays are written to `runs\`
+on your machine (a bind mount).
+
+Variations:
+
+```powershell
+$env:DASHBOARD_PORT=8770; docker compose up --build                 # 8765 is taken
+$env:DASHBOARD_LLM="fake"; docker compose up --build auction --no-deps   # canned answers, no model download
+docker compose run --rm auction python -m pytest -q                 # the test suite, on Linux
+```
+
+Measured on 2026-11-18 (Docker Desktop 29.9.2 on the dev laptop):
+
+- The full dashboard check (three leader kills, a cut link, an isolated
+  leader, Classic vs PreVote, a Vintage clock scenario with a kill and a
+  partition) passed in the container, 10/10 checker properties, never two
+  leaders in one term.
+- Failover is faster on Linux: a new leader about **0.63 s** after a kill
+  (1.2-1.6 s on Windows) and the first bid after it in 0.1-0.2 s, because
+  Linux refuses a connection to a dead port at once instead of after 2 s.
+- The real model works through the containers but is slower: about 6-7 s per
+  answer, against 1-2 s with Ollama on Windows, since Docker Desktop gives the
+  model only part of the CPU.
+- The test suite in the container: 780 passed, 11 skipped (Windows-only
+  process tests), 3 xfailed.
+- `docker stop` stops the dashboard and the nodes it started cleanly (exit 0,
+  about 1 s).
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        C1[ClusterClient<br/>client/auction_client.py]
+        H[chaos harness / demo<br/>scripts/chaos.py, demo.py]
+        W[web dashboard<br/>python -m dashboard<br/>http://127.0.0.1:8765]
+    end
+
+    subgraph N1["node n1 (python -m server.serve)"]
+        direction TB
+        A1["client port 5007x<br/>AuthInterceptor → Auth + Auction handlers<br/>server/"]
+        R1["replication/<br/>codec, StateMachine.apply_fn,<br/>§8 dedupe, read barrier"]
+        S1["auction/state.py apply()<br/>sessions/state.py"]
+        K1["raft/node.py RaftNode<br/>election, log, commit, applier"]
+        F1[("raft/file_storage.py<br/>data/n1: state.json + log.bin<br/>fsync before reply")]
+        P1["peer port 5006x<br/>RaftService + StatusService"]
+        A1 -- "propose / read_index" --> R1 --> K1
+        K1 -- "apply_fn(committed entry)" --> R1 --> S1
+        K1 --- F1
+        P1 --- K1
+    end
+
+    N2["node n2 (same)"]
+    N3["node n3 (same)"]
+    L["LLM server :50052<br/>llm_server/ (Ollama)"]
+    G["mock payment gateway<br/>in-process stub, server/payment_gateway.py"]
+
+    C1 -- "gRPC + token<br/>redirect to leader" --> A1
+    H --> A1
+    W -- "GetNodeStatus, DumpState" --> P1
+    W -- "ClusterClient: login, register,<br/>create, bid, ask" --> A1
+    P1 <-- "RequestVote / AppendEntries" --> N2
+    P1 <-- "RequestVote / AppendEntries" --> N3
+    A1 -- "leader only, deadline 25 s" --> L
+    A1 -- "leader only, before proposing" --> G
+```
+
+- **Client port** (50071-50073): `AuthService`, `AuctionService`,
+  `PaymentService` and `AssistantService` behind a session-token interceptor.
+  A follower answers "not leader, try *there*".
+- **Peer port** (50061-50063): `RaftService` (the two Raft RPCs) and
+  `StatusService` (read-only status for the dashboard and checker). It has no
+  auth (decisions.md A9, T2).
+- **Write path:** handler → `propose()` → leader's log → majority → commit →
+  `apply()` on every node → reply. Walkthrough:
+  [docs/auction-on-raft.md](docs/auction-on-raft.md) §2.
+- **Reads** are served only by the leader, after a read-index round
+  (decisions.md A14, A15).
+
+---
+
 ## Tests, stress, chaos, checker
 
 ```powershell
@@ -801,8 +705,7 @@ there.
 - **Anti-sniping is a rule inside `PlaceBid`, not a separate `ExtendAuction`
   command,** and it is opt-in per auction (the chaos workload and the
   scenarios do not use it: their bidders bid until the close, so it would
-  keep extending up to the cap). The terminal dashboard shows a state digest
-  rather than each node's high bid.
+  keep extending up to the cap).
 - **Logs from before the validation rules replay differently.** The seller
   rule and the create checks are in `apply()`, so a `data\` directory written
   earlier, in which a seller bid on their own auction, now replays that bid as

@@ -36,7 +36,7 @@ $includeDirs = @(
     "llm_server", "raft", "replication", "server", "sessions",
     "proto", "scripts", "docs", "tests"
 )
-$includeFiles = @("README.md", "requirements.txt", "pytest.ini", "LICENSE",
+$includeFiles = @("README.md", "reflections.md", "requirements.txt", "pytest.ini", "LICENSE",
                   "Dockerfile", "docker-compose.yml", ".dockerignore",
                   "Documents/Problem_Statement.md")
 

@@ -42,7 +42,7 @@ PACKAGES = tuple(sorted(
     if os.path.isfile(os.path.join(ROOT, d, "__init__.py")) and d != "tests"
 ))
 TREES = PACKAGES + ("proto", "scripts", "docs", "tests")
-TOP_FILES = ("README.md", "requirements.txt", "pytest.ini", "LICENSE",
+TOP_FILES = ("README.md", "reflections.md", "requirements.txt", "pytest.ini", "LICENSE",
              "Dockerfile", "docker-compose.yml", ".dockerignore")
 
 # Path segments that must never appear, and file names that must never appear.
