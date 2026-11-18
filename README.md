@@ -17,9 +17,7 @@ Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirement
 gRPC, auth and sessions, the closer, the LLM server) was written by the author.
 Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`). The M2 code (Raft,
 persistence, replication, the harness and checker, payment, the LLM wiring and
-the web dashboard) was built with an AI coding assistant, one chunk at a time,
-under the author's review: each chunk was studied, discussed and committed by
-the author.
+the web dashboard) was written with an AI tool.
 
 ---
 
