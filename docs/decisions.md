@@ -58,7 +58,7 @@ synchronisation between nodes, and we don't even compare readings across
 nodes.
 
 **Reference.** Paper §5.6: safety must not depend on timing; only availability does.
-(Also CLAUDE.md: `apply()` has no clocks. Election uses them, `apply()` doesn't.)
+(Also the working rules: `apply()` has no clocks. Election uses them, `apply()` doesn't.)
 
 **Viva: "Do the nodes need synchronised clocks?"** No. Each node only measures
 its own elapsed time since it last heard from a leader. Terms, not timestamps,
@@ -359,7 +359,7 @@ type; nothing sends one. `wire.append_args_to_wire` ignores `entries`.
 
 **Why this one.** The handout signature includes `entries`. Proto3 lets step 4
 add or change fields compatibly. `command` is opaque so the Raft layer stays
-ignorant of auctions (CLAUDE.md: LLM text enters the log only as plain data).
+ignorant of auctions (working rules: LLM text enters the log only as plain data).
 
 **Viva: "Why is `command` bytes?"** Raft replicates opaque commands; `apply()`
 interprets them. The consensus layer must not depend on the application.
@@ -449,7 +449,7 @@ is the right response.
 
 Code: `raft/node.py`, `raft/storage.py`, `raft/proposal.py`. Walkthrough:
 [raft-replication.md](raft-replication.md). Known gaps: section 7 of that file.
-These entries use CLAUDE.md's six-field template.
+These entries use the working rules' six-field template.
 
 ### R1. Entry payload is opaque bytes
 - Chose:        `LogEntry(term: int, data: bytes, kind=COMMAND)` (`raft/messages.py`).
@@ -464,7 +464,7 @@ These entries use CLAUDE.md's six-field template.
                 committed and replicated like any other, and `apply()` rejects it
                 the same way on every node. If Raft understood commands it would be
                 tempted to judge them, and judging needs state only the state
-                machine has. Bytes also force the encoding question (CLAUDE.md
+                machine has. Bytes also force the encoding question (working-rules
                 seam: `datetime` fields have no wire form) to be settled once, in
                 the auction layer. Persistence (step 6) needs that encoding anyway.
 - Paper:        Figure 2, State: "each entry contains command for state machine";
@@ -1117,7 +1117,7 @@ Code: `raft/file_storage.py`, `raft/storage.py` (the `Storage` protocol),
 - Alternatives: save lastApplied plus a state-machine snapshot together
                 (§7 snapshots); save only commitIndex.
 - Why:          Figure 2 puts commitIndex and lastApplied in the *volatile* box,
-                and the deterministic `apply()` (CLAUDE.md) means replaying the
+                and the deterministic `apply()` (working rules) means replaying the
                 same log rebuilds the same state. The only rule: lastApplied and
                 the state machine must be lost or kept *together*. Losing one
                 without the other either double-applies or skips entries. Saving
@@ -1279,7 +1279,7 @@ each part of that file.
                 `SessionState` on this node. Same `create/validate/destroy`
                 shape. `create` returns `Applied.token`, which on a dedupe hit
                 is the *first* attempt's token. No TTL.
-- Alternatives: accept re-login after a failover (CLAUDE.md's other option);
+- Alternatives: accept re-login after a failover (the working rules' other option);
                 derive the token deterministically inside `apply()` (for
                 example a hash of index and term); sticky sessions on one node.
 - Why:          Re-login on every failover would break the kill-the-leader
@@ -1290,7 +1290,7 @@ each part of that file.
                 text and `curr_time`. Returning `Applied.token` matters. A
                 retried Login mints a new token, but dedupe returns the first
                 response, and only the first token is in the table.
-- Paper:        §8 (dedupe); CLAUDE.md "apply() must be deterministic".
+- Paper:        §8 (dedupe); working rules "apply() must be deterministic".
 - Viva Q:       "Where is the randomness in your login, and why isn't that a
                 determinism bug?"
 - Answer:       In `SessionStore.create`, on the leader, before proposing. The
@@ -1393,7 +1393,7 @@ each part of that file.
                 second) but noisy. With it, exactly-once holds on a stable
                 leader without timing luck: the handle resolves only after
                 apply, by which time the auction is no longer due.
-- Paper:        —; CLAUDE.md "Time-dependent values are stamped once, before
+- Paper:        —; working rules "Time-dependent values are stamped once, before
                 proposing".
 - Viva Q:       "Two nodes both think they are leader for a moment. Can an
                 auction be closed twice, at two different times?"
@@ -1463,7 +1463,7 @@ each part of that file.
                 committed, the bid really did reach the cluster at the retry's
                 time. If it did commit, dedupe returns the first answer and the
                 new stamp is never used.
-- Paper:        CLAUDE.md "LLM output never enters the replicated log as a
+- Paper:        working rules "LLM output never enters the replicated log as a
                 call"; "stamped once, before proposing".
 - Viva Q:       "A follower receives a bid. Whose clock stamps it?"
 - Answer:       Nobody's. The follower redirects, and the client resends to
@@ -1699,7 +1699,7 @@ end of that file.
                 and every node decodes them the same way, but they can be one
                 microsecond off what the user meant. It is dev data only:
                 wipe `data\` (`Remove-Item -Recurse data`) after pulling this.
-- Paper:        none (wire format); CLAUDE.md "apply() must be deterministic".
+- Paper:        none (wire format); working rules "apply() must be deterministic".
 - Viva Q:       "Your M1 time conversion was wrong. Did that ever make two
                 replicas disagree?"
 - Answer:       No. Only the leader converts a datetime to micros, once, and
@@ -2171,7 +2171,7 @@ Code: `auction/state.py` (escrow commands), `server/payment_gateway.py`,
 Walkthrough: [payment-and-llm.md](payment-and-llm.md). Known gaps: the last
 section of that file.
 
-**Changes to M1 code in this chunk** (CLAUDE.md asks to say so): `auction/state.py`
+**Changes to M1 code in this chunk** (the working rules ask to say so): `auction/state.py`
 gained new command dataclasses, two rule functions and two new `isinstance`
 branches in `apply()`, placed before its final "not recognised" return. The
 `CreateAuction`, `PlaceBid` and `CloseAuction` branches are unchanged.
@@ -2380,7 +2380,7 @@ branches in `apply()`, placed before its final "not recognised" return. The
 
 ### Step 2: the LLM wired into the app
 
-**Changes to M1 code in step 2** (own commit, as CLAUDE.md asks):
+**Changes to M1 code in step 2** (own commit, as the working rules ask):
 `server/llm_client.py` (deadline, return value, one more dispatch branch),
 `server/auction_servicer.py` (`_describe` unpacks the tuple; `GetAuction`
 returns `summary`), `llm_server/llm_servicer.py`, `llm_server/config.py` and

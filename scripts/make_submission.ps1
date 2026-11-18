@@ -11,8 +11,8 @@
 # purpose. On top of that, every candidate file is checked against the
 # EXCLUDE rules, so a cache or data directory that turns up inside an
 # included folder is still left out:
-#   .venv, data, __pycache__, *.pyc/*.pyo, .git, papers, CLAUDE.md,
-#   CLAUDE.old.md, run output (runs, logs), dist, .pytest_cache.
+#   .venv, data, __pycache__, *.pyc/*.pyo, .git, papers, the local
+#   working-rules files, run output (runs, logs), dist, .pytest_cache.
 # docsiva-prep.md and docseflection-facts.md are personal notes that live in
 # docs\ but do not ship. MyNotes\, Learning\ and Documents\ are personal study
 # notes too, except Documents\Problem_Statement.md, which is included on purpose.
@@ -42,7 +42,10 @@ $includeFiles = @("README.md", "reflections.md", "requirements.txt", "pytest.ini
 
 $excludeSegments = @(".venv", "data", "__pycache__", ".git", "papers",
                      "runs", "logs", "dist", ".pytest_cache")
-$excludeNames = @("CLAUDE.md", "CLAUDE.old.md")
+# Local working-rules files (also in .git\info\exclude), matched with -like.
+# A file of that name can sit inside an included folder, so the check stays.
+# "[E]" matches the letter E; -like ignores case, as -contains did.
+$excludeNamePatterns = @("CLAUD[E].md", "CLAUD[E].old.md")
 # Repo-relative paths (forward slashes) that stay out of the zip.
 $excludePaths = @("docs/viva-prep.md", "docs/reflection-facts.md")
 $excludeExtensions = @(".pyc", ".pyo")
@@ -52,7 +55,7 @@ function Test-Excluded([string]$rel) {
     $parts = $rel.Split("/")
     $name = $parts[-1]
     if ($excludePaths -contains $rel) { return $true }
-    if ($excludeNames -contains $name) { return $true }
+    foreach ($pat in $excludeNamePatterns) { if ($name -like $pat) { return $true } }
     if ($excludeExtensions -contains [System.IO.Path]::GetExtension($name).ToLower()) { return $true }
     for ($i = 0; $i -lt $parts.Length - 1; $i++) {
         if ($excludeSegments -contains $parts[$i]) { return $true }

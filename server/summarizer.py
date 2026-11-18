@@ -29,7 +29,7 @@ THE MODEL IS DOWN OR SLOW: the call raises grpc.RpcError (LLMClient puts a
 deadline on every call). Nothing is proposed; the auction is already closed
 and stays closed. The auction is tried again after `retry_after_seconds`,
 not on the next tick, so a dead LLM server is not hammered. The pause is
-measured with time.monotonic(), never the wall clock (CLAUDE.md: Raft timers).
+measured with time.monotonic(), never the wall clock (working rules: Raft timers).
 
 Proposals carry client_id "" (the cluster is the author, like CloseAuction),
 so they are not deduplicated by the section 8 table; summary_rejection is

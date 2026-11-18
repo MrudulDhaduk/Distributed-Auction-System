@@ -1,6 +1,6 @@
 """Regenerate gRPC/protobuf code from proto/*.proto into generated/.
 
-Run this whenever a .proto file changes. See CLAUDE.md for why generated/
+Run this whenever a .proto file changes. See the working rules for why generated/
 is committed rather than built on the fly.
 """
 import re

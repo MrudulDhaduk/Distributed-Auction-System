@@ -397,9 +397,9 @@ applier is mid-append. The lock keeps them from seeing half-applied state.
 # How I'm working
 
 **Three chats:** manager (planning, review, what's next), tutor (concepts,
-no repo access), Claude Code (repo work, constrained by `CLAUDE.md`).
+no repo access), the build chat (repo work, constrained by the working rules).
 
-**Routing:** touches files → Claude Code. "Explain why" → tutor. "What next /
+**Routing:** touches files → the build chat. "Explain why" → tutor. "What next /
 is this design right" → manager.
 
 **Protected list — I write these myself, always:** `apply()`, command types,

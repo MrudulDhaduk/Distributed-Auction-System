@@ -17,7 +17,7 @@ Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirement
 gRPC, auth and sessions, the closer, the LLM server) was written by the author.
 Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`). The M2 code (Raft,
 persistence, replication, the harness and checker, and this chunk's payment and
-LLM wiring) was built with Claude Code, one chunk at a time, under the author's
+LLM wiring) was built with an AI coding assistant, one chunk at a time, under the author's
 review: each chunk was studied, discussed and committed by the author.
 
 ---
@@ -767,7 +767,7 @@ there.
 It prints the zip path and every file in it. It contains the code, `generated\`,
 `proto\`, `scripts\`, `tests\`, `docs\`, README, LICENSE, `requirements.txt`,
 `pytest.ini` and `Documents\Problem_Statement.md`. It leaves out `.venv`,
-`data\`, `__pycache__`, `.git`, `papers\`, CLAUDE.md, CLAUDE.old.md, `runs\`,
+`data\`, `__pycache__`, `.git`, `papers\`, the local working-rules files, `runs\`,
 `logs\`, `dist\`, the personal note folders `MyNotes\`, `Learning\` and the rest
 of `Documents\`, and two personal notes in `docs\`: `viva-prep.md` and
 `reflection-facts.md`. Tested by `tests\test_make_submission.py`.

@@ -32,7 +32,7 @@ The numbers are in [stress-results.md](stress-results.md).
 Not a Figure 2 rule: a wire-format bug, pinned by a strict xfail in step 4/5
 and fixed here on request, in its own commit.
 
-**Rule (CLAUDE.md):** "Time-dependent values are stamped once, before
+**Rule (working rules):** "Time-dependent values are stamped once, before
 proposing, and carried on the command." The stamp has to survive the trip to
 bytes exactly, because `apply()` compares `curr_time > close_time` to the
 microsecond.

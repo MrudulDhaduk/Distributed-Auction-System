@@ -6,7 +6,7 @@ checked:
   - it prints the zip path and a file list, and the list IS the zip;
   - the code, README, docs, proto files, scripts and tests are inside;
   - nothing from the exclusion list is: .venv, data, __pycache__/.pyc, .git,
-    papers, CLAUDE.md, CLAUDE.old.md, run output (runs/, logs/), dist/, and
+    papers, the local working-rules files, run output (runs/, logs/), dist/, and
     the author's personal notes docs/viva-prep.md and docs/reflection-facts.md;
   - docs/requirements-audit.md and Documents/Problem_Statement.md ARE in;
   - entries use forward slashes under one top-level folder, so the zip
@@ -15,6 +15,7 @@ checked:
 Windows only (the script is PowerShell 5.1). It does not unzip and run the
 suite from the copy: that is a manual step (README, "Submission")."""
 
+import fnmatch
 import os
 import re
 import shutil
@@ -48,7 +49,9 @@ TOP_FILES = ("README.md", "reflections.md", "requirements.txt", "pytest.ini", "L
 # Path segments that must never appear, and file names that must never appear.
 FORBIDDEN_SEGMENTS = {".venv", "data", "__pycache__", ".git", "papers", "runs",
                       "logs", "dist", ".pytest_cache"}
-FORBIDDEN_NAMES = {"CLAUDE.md", "CLAUDE.old.md"}
+# The local working-rules files, as the same wildcard patterns the script
+# uses ("[E]" is the letter E; fnmatch ignores case on Windows, like -like).
+FORBIDDEN_NAME_PATTERNS = ("CLAUD[E].md", "CLAUD[E].old.md")
 # Personal study notes: kept in the repo, left out of the zip (chunk 7).
 PERSONAL_DOCS = ("docs/viva-prep.md", "docs/reflection-facts.md")
 EXTRA_INCLUDED = ("docs/requirements-audit.md", "Documents/Problem_Statement.md")
@@ -138,7 +141,7 @@ def test_nothing_from_the_exclusion_list_is_included(built):
     bad = []
     for name in _names(built[0]):
         parts = name.split("/")[1:]  # drop the top folder
-        if FORBIDDEN_SEGMENTS.intersection(parts[:-1]) or parts[-1] in FORBIDDEN_NAMES \
+        if FORBIDDEN_SEGMENTS.intersection(parts[:-1]) or any(fnmatch.fnmatch(parts[-1], p) for p in FORBIDDEN_NAME_PATTERNS) \
                 or parts[-1].endswith((".pyc", ".pyo")):
             bad.append(name)
     assert not bad, bad
