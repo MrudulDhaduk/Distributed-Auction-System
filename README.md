@@ -333,6 +333,8 @@ background.
 - **Account** (right). Log in (one-click buttons for the test users, password
   `pass`) or **Create account**. Each browser **tab** is its own session, so
   two tabs can be two different users side by side.
+- **Raft mode** (switch in the Cluster header): **Classic Raft** or
+  **PreVote**. See [PreVote](#prevote-classic-raft-vs-the-improvement) below.
 - **New auction**. Item, duration (30 s to 1 h, or custom 15 s to 30 days),
   and optional attributes. With attributes, the leader asks the LLM to write
   the description before it proposes the auction.
@@ -388,6 +390,37 @@ only if the close time really had passed when the reply came.
 The checker reads the whole replicated state, so anything you did by hand in
 the same cluster is checked as well.
 
+### PreVote: classic Raft vs the improvement
+
+The switch in the Cluster header changes how every node starts an election.
+It takes effect at once and is re-applied to a node that is restarted.
+
+- **Classic Raft** (the paper's Figure 2, the default). When a follower's
+  election timer runs out, it raises its term and asks for votes. A node that
+  was frozen or cut off has its timer run out while it cannot hear the
+  leader, so when it comes back it raises the term, and the leader steps down
+  on seeing the higher term. Nothing is lost, but there is an election for no
+  reason.
+- **PreVote** (Ongaro's thesis, section 9.6). When the timer runs out, the
+  node first asks "would you vote for me in term T+1?" without changing its
+  own term. The others say yes only if that term is ahead of theirs, its log
+  is at least as up to date as theirs, and they have not heard from a leader
+  within the minimum election timeout. Only a majority of yes starts the real
+  election. A node coming back from a freeze gets no, and simply goes back
+  to following the leader. If the leader really is dead, nobody hears from
+  it, so the pre-vote succeeds and a new leader is elected as before.
+
+Measured on the dashboard (2026-11-18), suspending a follower for 3 s and
+resuming it, twice in each mode: Classic, the resumed node became leader
+both times and the term went up by one (n3→n1, term 1→2; n1→n2, term 2→3).
+PreVote, the same leader and the same term both times (n1 in term 2; n2 in
+term 3). Tests: `tests/test_raft_prevote.py`.
+
+How it is built: `RequestVote` has a `preVote` flag (`proto/raft.proto`); a
+node answering a pre-vote changes no state (`raft/node.py`
+`_answer_prevote`); `StatusService.SetPreVote` switches a node at run time;
+`python -m server.serve --prevote` starts a node with it on.
+
 ### A ten-minute walkthrough (by hand)
 
 To start with a busy cluster instead, press **Four auctions** (or **Chaos
@@ -436,11 +469,14 @@ workload**) first and do steps 7-10 while it runs.
    quorum**, and a bid now fails after about 15 s with *"No leader answered
    in time"*: one node out of three cannot commit anything. Restart one node,
    a leader is elected, and bids work again. Then restart the third.
-10. **Freeze a follower.** **Suspend** a follower. It turns light blue, and on
-    the leader's card its *last reply* age climbs and turns red, while bids
-    still commit on the other two nodes. **Resume** it and it catches up.
-    Suspending the leader instead shows a deposed leader coming back with an
-    old term.
+10. **Freeze a follower, in both Raft modes.** With **Classic Raft** selected,
+    **Suspend** a follower for a few seconds, then **Resume** it: it comes
+    back, starts an election with a higher term and usually becomes the new
+    leader, though nothing was wrong with the old one. Switch to **PreVote**
+    and do the same: the resumed node asks first, nobody agrees (they all
+    hear the leader), and the leader and the term stay as they were. While a
+    node is frozen its card turns light blue and the leader's *last reply* age
+    for it climbs and turns red, but bids still commit on the other two.
 11. **Watch the close.** When the countdown reaches 0 the card says
     `CLOSING…` until the leader's closer commits `CloseAuction`. Then it shows
     **Won by karan at ...** and, a few seconds later, the **summary**.
@@ -488,7 +524,7 @@ refused bidder must really be the seller). Tests:
   (for example `test_workload.py`, `test_failover_grpc.py`,
   `test_serve_grpc.py`, `test_harness.py`). Don't run the suite during a chaos
   run (testing-and-chaos.md Known gaps 13).
-- Last full run (2026-11-17, after the dashboard scenarios): 756 passed, 3 xfailed in 132 s. The 3 xfails are strict xfails: the
+- Last full run (2026-11-18, after PreVote): 764 passed, 3 xfailed in 134 s. The 3 xfails are strict xfails: the
   persistence tests run against MemoryStorage, to prove those tests can fail
   (decisions.md P13).
 - `pytest.ini` sets `--capture=sys`. With pytest's default capture a gRPC log
@@ -622,8 +658,10 @@ there.
 - **Client failover is floored at ~2 s on Windows** by the 2.0 s connect
   refusal to the dead leader's port (decisions.md T18,
   [testing-and-chaos.md](docs/testing-and-chaos.md) gap 12).
-- **A resumed follower deposes a healthy leader.** There is no PreVote and no
-  §6 rule (decisions.md T15). This costs liveness, never safety.
+- **In Classic Raft mode a resumed follower deposes a healthy leader**
+  (decisions.md T15). This costs liveness, never safety. The **PreVote**
+  mode fixes it; it is off by default so the code still matches the paper's
+  Figure 2 unless you switch it on. The §6 rule is not implemented.
 - **The chaos run's LLM was a canned-answer server.** The FAQ and price-trend
   reads are covered by unit and gRPC tests and the demo, not by chaos. (The
   chaos workload does read now: payers read `GetAuction`, sellers `GetEscrow`.)
