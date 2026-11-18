@@ -341,6 +341,10 @@ def test_the_client_retries_a_business_request_across_a_leader_kill_with_the_sam
     leader, seller, karan_token = open_auction(cluster)
     karan = client_for(cluster)
     karan.login("karan", "pass")
+    # Only n2 may campaign (n3's timeout is 30 s), and n3 refuses to vote for a
+    # candidate whose log is behind its own (paper 5.4.1). So n2 must have every
+    # entry before n1 dies, or no leader is elected for 30 s.
+    cluster.wait_converged()
     cluster.crash("n1")
     cluster.make_candidate("n2")
     cluster.wait_for_leader(among=["n2"])

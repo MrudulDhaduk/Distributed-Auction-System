@@ -413,6 +413,10 @@ def test_the_cluster_client_pays_and_reads_the_escrow_across_a_leader_kill(clust
 
     paid = winner.pay(1, 150)
     assert paid.result.success, paid.result.reason
+    # Only n2 may campaign (n3's timeout is 30 s), and n3 refuses to vote for a
+    # candidate whose log is behind its own (paper 5.4.1). So n2 must have every
+    # entry before n1 dies, or no leader is elected for 30 s.
+    cluster.wait_converged()
     cluster.crash("n1")
     cluster.make_candidate("n2")
     cluster.wait_for_leader(among=["n2"])  # as the sibling failover tests do: the election is not what this tests

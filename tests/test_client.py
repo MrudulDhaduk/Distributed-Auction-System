@@ -66,6 +66,10 @@ def test_kill_the_leader_mid_auction_same_token_no_acknowledged_bid_lost(cluster
         assert client.place_bid(1, amount).result.success
         acknowledged.append(amount)
     karan_token = karan.token
+    # Only n2 may campaign (n3's timeout is 30 s), and n3 refuses to vote for a
+    # candidate whose log is behind its own (paper 5.4.1). So n2 must have every
+    # entry before n1 dies, or no leader is elected for 30 s.
+    cluster.wait_converged()
 
     cluster.crash("n1")
     cluster.make_candidate("n2")  # the test picks who campaigns; the client does not know

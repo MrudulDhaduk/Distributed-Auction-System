@@ -76,6 +76,11 @@ class Writer(threading.Thread):
         super().__init__(daemon=True)
         self.client = ClusterClient(addrs, give_up_after=give_up_after)
         self.user = USERS[index % len(USERS)]
+        # The auction is created by another user: apply() refuses a seller's
+        # bid on their own auction, so a writer that sold its own auction would
+        # have every bid refused.
+        self.seller = ClusterClient(addrs, give_up_after=give_up_after)
+        self.seller_user = USERS[(index + 1) % len(USERS)]
         self.auction_id = auction_id
         self.stop = stop
         self.samples = []
@@ -83,11 +88,12 @@ class Writer(threading.Thread):
 
     def new_auction(self):
         close = time_conv.dt_to_micros(time_conv.now_utc() + FAR)
-        r = self.client.create_auction(self.auction_id, f"stress {self.auction_id}", close)
+        r = self.seller.create_auction(self.auction_id, f"stress {self.auction_id}", close)
         assert r.result.success, r.result.reason
 
     def setup(self):
         assert self.client.login(self.user, PASSWORD).result.success
+        assert self.seller.login(self.seller_user, PASSWORD).result.success
         self.new_auction()
 
     def run(self):
@@ -116,6 +122,7 @@ class Writer(threading.Thread):
         finally:
             self.ready.set()
             self.client.close()
+            self.seller.close()
 
 
 def throughput(args, out):
