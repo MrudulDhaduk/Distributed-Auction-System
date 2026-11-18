@@ -2,8 +2,7 @@
 
 What this chunk adds, and why each piece sits where it does. Decisions with
 their viva questions: [decisions.md](decisions.md) section "Payment, LLM
-wiring, checker (chunk 7)" (C1 to C22). The requirement-by-requirement status
-is [requirements-audit.md](requirements-audit.md).
+wiring, checker (chunk 7)" (C1 to C22).
 
 There are no new Raft rules here. Raft (`raft/`, `replication/replicator.py`)
 is untouched. Everything below is about the rule that sits on top of Raft:

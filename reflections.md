@@ -83,11 +83,11 @@ Two things are still unexplained: the cause of the original stall that led to th
 
 ## 5. What I would do differently
 
-- Add PreVote (or the §6 rule that ignores vote requests inside the minimum election timeout), so a node coming back from a pause cannot depose a healthy leader.
+- Add CheckQuorum (§6 of the paper and §9.6 of Ongaro's thesis), so a leader cut off from the majority steps down on its own instead of waiting to hear a higher term. PreVote and simulated partitions are in the system now, and the partition tests show the old leader lingering until the network heals.
 - Use the §5.3 conflict hint so a lagging follower catches up in one round trip, not one per missing entry, and add log snapshots so a restart does not replay the whole log.
 - Fix the M1 `apply()` so it does not scan every bid on each `PlaceBid` (0.15 ms at 1 000 bids, 2.85 ms at 25 000).
-- Build a deterministic simulator on a virtual clock (the approach of my separate GroundHog project). Our chaos runs are seeded but use real processes and real time, so a failing run cannot be replayed exactly.
-- Test the real model under chaos, not a canned stand-in, and add real network partitions between processes.
+- Build a deterministic simulator on a virtual clock. Our chaos runs are seeded but use real processes and real time, so a failing run cannot be replayed exactly.
+- Test the real model under chaos, not a canned stand-in, and add partitions to the chaos harness's random fault schedule (today they are cut by hand from the dashboard).
 
 ---
 

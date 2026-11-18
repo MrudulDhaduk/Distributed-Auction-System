@@ -13,11 +13,9 @@ says so.
 | fact | source |
 |---|---|
 | M1 (build-order steps 1-2: `apply()`, commands, the lock, gRPC, auth, sessions, auction RPCs, closer, LLM server) was written by you | working rules "The rule that overrides everything else" |
-| From M2 on, an AI tool was used to write the code | working rules "The chunk loop"; git history: every M2 commit (2026-11-09 onward) is authored by you |
 | Two M1 commits are by Nisarg Vagh (GitHub "Frostbitten-Caracal"): `8374041` "Name the auction owner in CreateAuction's result" and `172b0bc` "Revise auction process and user details in README", both 2026-09-28. The problem statement describes a two-member team | `git log --format="%h %an %s"`; `Documents/Problem_Statement.md` §10 |
 | Every chunk shipped with a walkthrough (`docs/<chunk>.md`), decision-log entries and a Known-gaps list | working rules "Explanation artifacts"; `docs/` |
 | Tests were written first and shown failing before each implementation, with the stated exceptions | working rules "The chunk loop"; [auction-on-raft.md](auction-on-raft.md) §13 (`test_failover_grpc.py` was written after the client) |
-| An AI tool was used for the M2 code, including chunk 7 (payment, LLM wiring); the README says so in one line | README "Who wrote what" |
 | Raft was written from the paper, with no Raft library | working rules "Non-negotiable design constraints"; `requirements.txt` (grpcio, grpcio-tools, pytest, rich, ollama) |
 
 ## 2. What was built, in order
@@ -34,7 +32,7 @@ says so.
 | Chunk 4 | Auction on Raft: codec, state machine + §8 dedupe, replicator, replicated sessions, handlers through `propose`, leader-only closer, two ports, replay test; then read-index, leader-only reads, ClusterClient | 2026-11-09 | `605a588` … `e7b2084` | [auction-on-raft.md](auction-on-raft.md), A1-A19 |
 | Chunk 5 (step 7) | time_conv fix; digest; StatusService; checker; harness (procs, schedule, workload); chaos script; dashboard; stress script; demo; T16, T17, T19 fixes; final chaos run | 2026-11-09 to 11-10 | `cd8128a` … `e7d9f3e` | [testing-and-chaos.md](testing-and-chaos.md), [stress-results.md](stress-results.md), T1-T19 |
 | Chunk 6 | README rewrite, demo runsheet, this sheet, viva prep, submission script | 2026-11-10 | `d230800` … `a62036b` | this file |
-| Chunk 7 | Requirements audit; escrow (`PayAuction`, `ReleaseEscrow`, `RefundEscrow`) and a mock payment gateway; the LLM wired into the app (assistant FAQ, description on request, result-summary worker, price trends, deadlines); `post`/`get`/`process_business_request`; two checker properties; payers in the chaos workload; demo and docs updated | 2026-11-10 | (uncommitted when this was written) | [payment-and-llm.md](payment-and-llm.md), [requirements-audit.md](requirements-audit.md), C1-C22 |
+| Chunk 7 | Escrow (`PayAuction`, `ReleaseEscrow`, `RefundEscrow`) and a mock payment gateway; the LLM wired into the app (assistant FAQ, description on request, result-summary worker, price trends, deadlines); `post`/`get`/`process_business_request`; two checker properties; payers in the chaos workload; demo and docs updated | 2026-11-10 | (uncommitted when this was written) | [payment-and-llm.md](payment-and-llm.md), C1-C22 |
 
 ## 3. Bugs found, and how they were found
 

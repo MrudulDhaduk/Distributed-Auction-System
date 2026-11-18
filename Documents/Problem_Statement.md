@@ -7,7 +7,7 @@
 | Team member | ID | Primary responsibility |
 | --- | --- | --- |
 | *Dhaduk Mrudul* | *2026H1030069P* | Application server, auction logic, Raft |
-| *Nisarg Vagh* | *2026H1030066P* | Client tooling, LLM server, evaluation harness, Docker |
+| *Nisarg Vagh* | *2026H1030066P* | LLM server, web dashboard, PreVote and network partitions, anti-sniping, replicated accounts, Docker |
 
 
 ---
@@ -114,4 +114,4 @@ Source code with README covering setup, deployment and usage; a 5–10 minute de
 | Raft is the largest single piece of work | Isolated behind `apply()` from week 1; leader election built and tested before log replication |
 | Two-member team on a three-member scope | Instructor approval sought; §8 treated as stretch, not planned scope |
 | LLM setup and model download can consume days | Model selected and downloaded in the first fortnight, before it blocks integration |
-| Consensus bugs are rare and timing-dependent | Dashboard (§6.1) for live observation, seeded chaos (§6.3) for repeatable reproduction |
+| Consensus bugs are rare and timing-dependent | Dashboard (§6.1) for live observation, seeded chaos (§6.3) for repeatable reproduction |

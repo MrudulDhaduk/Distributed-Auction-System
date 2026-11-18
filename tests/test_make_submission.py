@@ -8,7 +8,7 @@ checked:
   - nothing from the exclusion list is: .venv, data, __pycache__/.pyc, .git,
     papers, the local working-rules files, run output (runs/, logs/), dist/, and
     the author's personal notes docs/viva-prep.md and docs/reflection-facts.md;
-  - docs/requirements-audit.md and Documents/Problem_Statement.md ARE in;
+  - Documents/Problem_Statement.md IS in;
   - entries use forward slashes under one top-level folder, so the zip
     unpacks the same with Windows Explorer, PowerShell or Python.
 
@@ -54,7 +54,7 @@ FORBIDDEN_SEGMENTS = {".venv", "data", "__pycache__", ".git", "papers", "runs",
 FORBIDDEN_NAME_PATTERNS = ("CLAUD[E].md", "CLAUD[E].old.md")
 # Personal study notes: kept in the repo, left out of the zip (chunk 7).
 PERSONAL_DOCS = ("docs/viva-prep.md", "docs/reflection-facts.md")
-EXTRA_INCLUDED = ("docs/requirements-audit.md", "Documents/Problem_Statement.md")
+EXTRA_INCLUDED = ("Documents/Problem_Statement.md",)
 
 
 @pytest.fixture(scope="module")
@@ -129,7 +129,7 @@ def test_key_files_are_there_by_name(built):
                 "replication/state_machine.py", "checker/properties.py",
                 "proto/raft.proto", "proto/commands.proto", "generated/raft_pb2.py",
                 "docs/decisions.md", "docs/stress-results.md", "docs/payment-and-llm.md",
-                "docs/demo-runsheet.md", "docs/requirements-audit.md", "Documents/Problem_Statement.md",
+                "docs/demo-runsheet.md", "Documents/Problem_Statement.md",
                 "scripts/make_submission.ps1", "scripts/chaos.py", "tests/conftest.py",
                 "dashboard/__main__.py", "dashboard/server.py", "dashboard/scenarios.py",
                 "dashboard/static/index.html", "dashboard/static/app.js", "dashboard/static/style.css",

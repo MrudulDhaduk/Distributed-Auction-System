@@ -1,5 +1,7 @@
 # GroundHog: Distributed Auction System
 
+> AI tools were used in the development of this project.
+
 An online auction (log in, create an auction, bid, automatic close, one winner)
 replicated across three servers with **Raft, implemented from the paper**
 (Ongaro & Ousterhout, extended version; no Raft library). Python 3 and gRPC.
@@ -11,13 +13,7 @@ writes item descriptions and result summaries, and summarises price trends;
 its text is replicated as plain data, never as a call.
 Built for CS G623 (Advanced Operating Systems). It ships with a seeded chaos
 harness and a property checker that tests the guarantees on real processes.
-Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirements-audit.md).
-
-**Who wrote what.** The M1 code (`auction/state.py`'s `apply()` and commands,
-gRPC, auth and sessions, the closer, the LLM server) was written by the author.
-Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`). The M2 code (Raft,
-persistence, replication, the harness and checker, payment, the LLM wiring and
-the web dashboard) was written with an AI tool.
+Team contributions and learnings: [reflections.md](reflections.md).
 
 ---
 
@@ -700,7 +696,6 @@ there.
 | [docs/raft-persistence.md](docs/raft-persistence.md) | FileStorage, durable-before-reply, torn tails |
 | [docs/auction-on-raft.md](docs/auction-on-raft.md) | the auction on the log, sessions, dedupe, read-index, the client |
 | [docs/payment-and-llm.md](docs/payment-and-llm.md) | escrow, the LLM in the app, the new checker properties, known gaps |
-| [docs/requirements-audit.md](docs/requirements-audit.md) | every assignment requirement: status, code, evidence |
 | [docs/testing-and-chaos.md](docs/testing-and-chaos.md) | status RPC, dashboard, chaos harness, checker, results |
 | [docs/stress-results.md](docs/stress-results.md) | throughput, latency, failover vs. the paper's Figure 16 |
 | [docs/decisions.md](docs/decisions.md) | every non-obvious choice, with the viva question |
