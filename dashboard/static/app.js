@@ -85,10 +85,28 @@ async function withBusy(btn, fn) {
 }
 
 function setSession(sid, me) {
+  const changed = me !== S.me;
   S.session = sid; S.me = me;
   safeSet("dash.session", sid);
   renderAccount();
-  for (const ref of S.auctions.values()) ref.dirty = true;
+  if (changed) onAccountChange();
+}
+
+/* A different person is using this tab now: nothing of the previous user's
+   assistant conversations may stay on screen or in this tab's storage. */
+function onAccountChange() {
+  // Keys are "<user>:<auction>". Keep only the signed-in user's own threads,
+  // so a page reload keeps yours and a switch drops everyone else's.
+  const keep = S.me ? `${S.me}:` : null;
+  for (const k of Object.keys(S.chats)) if (!keep || !k.startsWith(keep)) delete S.chats[k];
+  saveJSON("dash.chats", S.chats);
+  for (const ref of S.auctions.values()) {
+    ref.dirty = true;
+    ref.ai.classList.remove("open");
+    ref.descForm.classList.remove("open");
+    $("input", ref.aiForm).value = "";
+    drawThread(ref);
+  }
 }
 
 /* ---------- polling ---------- */
@@ -102,7 +120,7 @@ async function poll() {
     // Only trust "me" if the session did not change while this poll was in flight.
     if (sid === S.session) {
       if (sid && !d.me) { setSession(null, null); toast("Your dashboard session ended (was the dashboard restarted?). Log in again.", "err"); }
-      else if (d.me !== S.me) { S.me = d.me; renderAccount(); for (const ref of S.auctions.values()) ref.dirty = true; }
+      else if (d.me !== S.me) { S.me = d.me; renderAccount(); onAccountChange(); }
     } else d.me = S.me;
     const pc = $("#pill-conn"); pc.textContent = "live"; pc.className = "pill ok";
     render(d);
