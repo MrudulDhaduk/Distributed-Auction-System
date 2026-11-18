@@ -61,6 +61,11 @@ class StatusServiceStub:
                 request_serializer=status__pb2.SetPreVoteRequest.SerializeToString,
                 response_deserializer=status__pb2.NodeStatus.FromString,
                 _registered_method=True)
+        self.SetBlockedPeers = channel.unary_unary(
+                '/status.StatusService/SetBlockedPeers',
+                request_serializer=status__pb2.SetBlockedPeersRequest.SerializeToString,
+                response_deserializer=status__pb2.NodeStatus.FromString,
+                _registered_method=True)
 
 
 class StatusServiceServicer:
@@ -99,6 +104,15 @@ class StatusServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SetBlockedPeers(self, request, context):
+        """Operator switch: cut the Raft links to these peers (and restore all
+        others). A simulated partition: Raft messages to and from them are lost
+        in both directions. Client ports are not affected. Volatile.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StatusServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -115,6 +129,11 @@ def add_StatusServiceServicer_to_server(servicer, server):
             'SetPreVote': grpc.unary_unary_rpc_method_handler(
                     servicer.SetPreVote,
                     request_deserializer=status__pb2.SetPreVoteRequest.FromString,
+                    response_serializer=status__pb2.NodeStatus.SerializeToString,
+            ),
+            'SetBlockedPeers': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetBlockedPeers,
+                    request_deserializer=status__pb2.SetBlockedPeersRequest.FromString,
                     response_serializer=status__pb2.NodeStatus.SerializeToString,
             ),
     }
@@ -210,6 +229,33 @@ class StatusService:
             target,
             '/status.StatusService/SetPreVote',
             status__pb2.SetPreVoteRequest.SerializeToString,
+            status__pb2.NodeStatus.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetBlockedPeers(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/status.StatusService/SetBlockedPeers',
+            status__pb2.SetBlockedPeersRequest.SerializeToString,
             status__pb2.NodeStatus.FromString,
             options,
             channel_credentials,

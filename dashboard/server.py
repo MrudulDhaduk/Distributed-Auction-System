@@ -127,6 +127,7 @@ class Dashboard:
         self.scenario = None                                  # the current or last ScenarioRun
         self._scenario_no = 0
         self.prevote = False                                  # desired Raft mode on every node
+        self.cut_links = set()                                # {frozenset({a, b})}: simulated partition
 
     # --- lifecycle -----------------------------------------------------------------
 
@@ -182,6 +183,7 @@ class Dashboard:
             "election_timeout_max_ms": m.election_timeout_max_ms,
             "pid": m.pid,
             "prevote": m.prevote,
+            "blocked_peers": sorted(m.blocked_peers),
         }
 
     def _set_prevote_on(self, nid, on):
@@ -189,6 +191,79 @@ class Dashboard:
             self._stubs[nid].SetPreVote(status_pb2.SetPreVoteRequest(on=on), timeout=STATUS_TIMEOUT)
         except grpc.RpcError:
             pass  # down or frozen: tried again on the next poll
+
+    # --- simulated partitions ----------------------------------------------------
+
+    def _blocked_for(self, nid) -> list:
+        with self._lock:
+            return sorted(next(iter(link - {nid})) for link in self.cut_links if nid in link)
+
+    def _set_blocked_on(self, nid, peers):
+        try:
+            self._stubs[nid].SetBlockedPeers(status_pb2.SetBlockedPeersRequest(peers=peers), timeout=STATUS_TIMEOUT)
+        except grpc.RpcError:
+            pass  # down or frozen: tried again on the next poll
+
+    def _apply_links(self):
+        for nid in self._stubs:
+            self._pool.submit(self._set_blocked_on, nid, self._blocked_for(nid))
+
+    def set_link(self, payload):
+        payload = validate.body(payload)
+        a, b, cut = payload.get("a"), payload.get("b"), payload.get("cut")
+        if a not in self._stubs or b not in self._stubs or a == b:
+            raise Invalid("Pick two different nodes")
+        if not isinstance(cut, bool):
+            raise Invalid("Send cut: true or false")
+        link = frozenset((a, b))
+        with self._lock:
+            (self.cut_links.add if cut else self.cut_links.discard)(link)
+        self._apply_links()
+        self.event("partition", f"{'cut' if cut else 'restored'} link {min(a, b)}-{max(a, b)}")
+        self._scenario_note(f"you: {'cut' if cut else 'restored'} link {min(a, b)}-{max(a, b)}")
+        return {"ok": True, "message": f"link {min(a, b)}-{max(a, b)} {'cut' if cut else 'restored'}"}
+
+    def network_preset(self, payload):
+        name = validate.body(payload).get("name")
+        ids = sorted(self._stubs)
+        with self._lock:
+            leader = self.leader
+            up = [n for n, s in self.nodes.items() if s is not None]
+        if name == "heal":
+            return self.heal_network()
+        if name == "isolate_leader":
+            if leader is None:
+                raise Invalid("There is no leader to isolate right now")
+            target = leader
+        elif name == "isolate_follower":
+            followers = [n for n in up if n != leader]
+            if not followers:
+                raise Invalid("No follower is answering")
+            target = followers[0]
+        else:
+            raise Invalid("Unknown preset")
+        with self._lock:
+            self.cut_links = {frozenset((target, o)) for o in ids if o != target}
+        self._apply_links()
+        what = "leader" if target == leader else "follower"
+        self.event("partition", f"isolated {target} ({what}) from the other two")
+        self._scenario_note(f"you: isolated {target} ({what})")
+        return {"ok": True, "message": f"{target} is cut off from the other two"}
+
+    def heal_network(self):
+        with self._lock:
+            had = bool(self.cut_links)
+            self.cut_links = set()
+        self._apply_links()
+        if had:
+            self.event("partition", "network healed: every link restored")
+            self._scenario_note("network healed")
+        return {"ok": True, "message": "every link restored"}
+
+    def _scenario_note(self, text):
+        run = self.scenario
+        if run is not None and run.is_alive():
+            run.say(text)
 
     def set_prevote(self, payload):
         payload = validate.body(payload)
@@ -215,10 +290,13 @@ class Dashboard:
                 self.nodes, self.leader = view, leader
                 for s in leaders:
                     self._leaders.add((s["term"], s["node_id"]))
-            # A restarted node comes back with PreVote off: put it in the chosen mode.
+            # A restarted node comes back with PreVote off and every link up:
+            # put it back in the chosen mode and partition.
             for nid, s in view.items():
                 if s is not None and s["prevote"] != self.prevote:
                     self._pool.submit(self._set_prevote_on, nid, self.prevote)
+                if s is not None and s["blocked_peers"] != self._blocked_for(nid):
+                    self._pool.submit(self._set_blocked_on, nid, self._blocked_for(nid))
 
     def _status_events(self, view, leader):
         for nid, s in view.items():
@@ -358,6 +436,7 @@ class Dashboard:
                 "state_from": self.state_from, "state_at": self.state_at,
                 "events": list(self.events)[-120:], "llm": self.llm_status,
                 "llm_mode": self.llm_mode, "me": me.username if me else None, "prevote": self.prevote,
+                "cut_links": sorted(sorted(link) for link in self.cut_links),
                 "run_dir": self.run_dir,
                 "scenario": None if self.scenario is None else self.scenario.view(),
                 "scenarios": {"catalog": SCENARIOS, "chaos_durations": CHAOS_DURATIONS},
@@ -666,6 +745,10 @@ def make_handler(dash: Dashboard):
                     result = dash.start_scenario(parts[2], payload)
                 elif path == "/api/raft/prevote":
                     result = dash.set_prevote(payload)
+                elif path == "/api/network/link":
+                    result = dash.set_link(payload)
+                elif path == "/api/network/preset":
+                    result = dash.network_preset(payload)
                 elif path in ("/api/pay", "/api/release", "/api/refund"):
                     result = dash.escrow_action(sid, path.rsplit("/", 1)[1], payload)
                 elif path == "/api/scenarios/stop":

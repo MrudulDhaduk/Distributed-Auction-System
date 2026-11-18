@@ -24,25 +24,27 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cstatus.proto\x12\x06status\"\x1f\n\x11SetPreVoteRequest\x12\n\n\x02on\x18\x01 \x01(\x08\"+\n\x11NodeStatusRequest\x12\x16\n\x0einclude_digest\x18\x01 \x01(\x08\"\x82\x04\n\nNodeStatus\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0c\n\x04role\x18\x02 \x01(\t\x12\x0c\n\x04term\x18\x03 \x01(\x03\x12\x11\n\tleader_id\x18\x04 \x01(\t\x12\x11\n\tvoted_for\x18\x05 \x01(\t\x12\x14\n\x0c\x63ommit_index\x18\x06 \x01(\x03\x12\x14\n\x0clast_applied\x18\x07 \x01(\x03\x12\x16\n\x0elast_log_index\x18\x08 \x01(\x03\x12\x15\n\rlast_log_term\x18\t \x01(\x03\x12\x14\n\x0cstate_digest\x18\n \x01(\t\x12\x14\n\x0c\x64igest_index\x18\x0b \x01(\x03\x12\x1b\n\x13heartbeats_received\x18\x0c \x01(\x03\x12\x1d\n\x15last_heartbeat_age_ms\x18\r \x01(\x03\x12\x1e\n\x16\x65lection_timer_left_ms\x18\x0e \x01(\x03\x12\x17\n\x0fheartbeats_sent\x18\x0f \x01(\x03\x12&\n\x05peers\x18\x10 \x03(\x0b\x32\x17.status.PeerReplication\x12\x1d\n\x15heartbeat_interval_ms\x18\x11 \x01(\x03\x12\x1f\n\x17\x65lection_timeout_min_ms\x18\x12 \x01(\x03\x12\x1f\n\x17\x65lection_timeout_max_ms\x18\x13 \x01(\x03\x12\x0b\n\x03pid\x18\x14 \x01(\x03\x12\x0f\n\x07prevote\x18\x15 \x01(\x08\"w\n\x0fPeerReplication\x12\x0f\n\x07peer_id\x18\x01 \x01(\t\x12\x0f\n\x07replies\x18\x02 \x01(\x03\x12\x19\n\x11last_reply_age_ms\x18\x03 \x01(\x03\x12\x13\n\x0bmatch_index\x18\x04 \x01(\x03\x12\x12\n\nnext_index\x18\x05 \x01(\x03\"\x12\n\x10\x44umpStateRequest\"\\\n\tStateDump\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x14\n\x0c\x64igest_index\x18\x02 \x01(\x03\x12\x14\n\x0cstate_digest\x18\x03 \x01(\t\x12\x12\n\nstate_json\x18\x04 \x01(\t2\xc6\x01\n\rStatusService\x12>\n\rGetNodeStatus\x12\x19.status.NodeStatusRequest\x1a\x12.status.NodeStatus\x12\x38\n\tDumpState\x12\x18.status.DumpStateRequest\x1a\x11.status.StateDump\x12;\n\nSetPreVote\x12\x19.status.SetPreVoteRequest\x1a\x12.status.NodeStatusb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cstatus.proto\x12\x06status\"\'\n\x16SetBlockedPeersRequest\x12\r\n\x05peers\x18\x01 \x03(\t\"\x1f\n\x11SetPreVoteRequest\x12\n\n\x02on\x18\x01 \x01(\x08\"+\n\x11NodeStatusRequest\x12\x16\n\x0einclude_digest\x18\x01 \x01(\x08\"\x99\x04\n\nNodeStatus\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x0c\n\x04role\x18\x02 \x01(\t\x12\x0c\n\x04term\x18\x03 \x01(\x03\x12\x11\n\tleader_id\x18\x04 \x01(\t\x12\x11\n\tvoted_for\x18\x05 \x01(\t\x12\x14\n\x0c\x63ommit_index\x18\x06 \x01(\x03\x12\x14\n\x0clast_applied\x18\x07 \x01(\x03\x12\x16\n\x0elast_log_index\x18\x08 \x01(\x03\x12\x15\n\rlast_log_term\x18\t \x01(\x03\x12\x14\n\x0cstate_digest\x18\n \x01(\t\x12\x14\n\x0c\x64igest_index\x18\x0b \x01(\x03\x12\x1b\n\x13heartbeats_received\x18\x0c \x01(\x03\x12\x1d\n\x15last_heartbeat_age_ms\x18\r \x01(\x03\x12\x1e\n\x16\x65lection_timer_left_ms\x18\x0e \x01(\x03\x12\x17\n\x0fheartbeats_sent\x18\x0f \x01(\x03\x12&\n\x05peers\x18\x10 \x03(\x0b\x32\x17.status.PeerReplication\x12\x1d\n\x15heartbeat_interval_ms\x18\x11 \x01(\x03\x12\x1f\n\x17\x65lection_timeout_min_ms\x18\x12 \x01(\x03\x12\x1f\n\x17\x65lection_timeout_max_ms\x18\x13 \x01(\x03\x12\x0b\n\x03pid\x18\x14 \x01(\x03\x12\x0f\n\x07prevote\x18\x15 \x01(\x08\x12\x15\n\rblocked_peers\x18\x16 \x03(\t\"w\n\x0fPeerReplication\x12\x0f\n\x07peer_id\x18\x01 \x01(\t\x12\x0f\n\x07replies\x18\x02 \x01(\x03\x12\x19\n\x11last_reply_age_ms\x18\x03 \x01(\x03\x12\x13\n\x0bmatch_index\x18\x04 \x01(\x03\x12\x12\n\nnext_index\x18\x05 \x01(\x03\"\x12\n\x10\x44umpStateRequest\"\\\n\tStateDump\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x14\n\x0c\x64igest_index\x18\x02 \x01(\x03\x12\x14\n\x0cstate_digest\x18\x03 \x01(\t\x12\x12\n\nstate_json\x18\x04 \x01(\t2\x8d\x02\n\rStatusService\x12>\n\rGetNodeStatus\x12\x19.status.NodeStatusRequest\x1a\x12.status.NodeStatus\x12\x38\n\tDumpState\x12\x18.status.DumpStateRequest\x1a\x11.status.StateDump\x12;\n\nSetPreVote\x12\x19.status.SetPreVoteRequest\x1a\x12.status.NodeStatus\x12\x45\n\x0fSetBlockedPeers\x12\x1e.status.SetBlockedPeersRequest\x1a\x12.status.NodeStatusb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'status_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_SETPREVOTEREQUEST']._serialized_start=24
-  _globals['_SETPREVOTEREQUEST']._serialized_end=55
-  _globals['_NODESTATUSREQUEST']._serialized_start=57
-  _globals['_NODESTATUSREQUEST']._serialized_end=100
-  _globals['_NODESTATUS']._serialized_start=103
-  _globals['_NODESTATUS']._serialized_end=617
-  _globals['_PEERREPLICATION']._serialized_start=619
-  _globals['_PEERREPLICATION']._serialized_end=738
-  _globals['_DUMPSTATEREQUEST']._serialized_start=740
-  _globals['_DUMPSTATEREQUEST']._serialized_end=758
-  _globals['_STATEDUMP']._serialized_start=760
-  _globals['_STATEDUMP']._serialized_end=852
-  _globals['_STATUSSERVICE']._serialized_start=855
-  _globals['_STATUSSERVICE']._serialized_end=1053
+  _globals['_SETBLOCKEDPEERSREQUEST']._serialized_start=24
+  _globals['_SETBLOCKEDPEERSREQUEST']._serialized_end=63
+  _globals['_SETPREVOTEREQUEST']._serialized_start=65
+  _globals['_SETPREVOTEREQUEST']._serialized_end=96
+  _globals['_NODESTATUSREQUEST']._serialized_start=98
+  _globals['_NODESTATUSREQUEST']._serialized_end=141
+  _globals['_NODESTATUS']._serialized_start=144
+  _globals['_NODESTATUS']._serialized_end=681
+  _globals['_PEERREPLICATION']._serialized_start=683
+  _globals['_PEERREPLICATION']._serialized_end=802
+  _globals['_DUMPSTATEREQUEST']._serialized_start=804
+  _globals['_DUMPSTATEREQUEST']._serialized_end=822
+  _globals['_STATEDUMP']._serialized_start=824
+  _globals['_STATEDUMP']._serialized_end=916
+  _globals['_STATUSSERVICE']._serialized_start=919
+  _globals['_STATUSSERVICE']._serialized_end=1188
 # @@protoc_insertion_point(module_scope)

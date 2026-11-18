@@ -21,6 +21,14 @@ service StatusService {
   // Operator switch: PreVote on or off on this node (raft/node.py
   // set_prevote). Volatile: a restarted node starts with its --prevote flag.
   rpc SetPreVote(SetPreVoteRequest) returns (NodeStatus);
+  // Operator switch: cut the Raft links to these peers (and restore all
+  // others). A simulated partition: Raft messages to and from them are lost
+  // in both directions. Client ports are not affected. Volatile.
+  rpc SetBlockedPeers(SetBlockedPeersRequest) returns (NodeStatus);
+}
+
+message SetBlockedPeersRequest {
+  repeated string peers = 1;
 }
 
 message SetPreVoteRequest {
@@ -73,6 +81,8 @@ message NodeStatus {
   int64 election_timeout_max_ms = 19;
   int64 pid = 20;                     // this process's id (os.getpid())
   bool prevote = 21;                  // PreVote on (Ongaro's thesis 9.6)?
+  // Peers whose link is cut (simulated partition, SetBlockedPeers).
+  repeated string blocked_peers = 22;
 }
 
 message PeerReplication {

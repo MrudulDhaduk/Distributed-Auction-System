@@ -175,6 +175,9 @@ class ScenarioRun(threading.Thread):
 
     def _check(self):
         cluster = self.dash.cluster
+        if self.dash.cut_links:
+            self.dash.heal_network()
+            self.say("restored every cut link for the check")
         for nid, node in cluster.nodes.items():
             if node.state == "suspended":
                 node.resume()

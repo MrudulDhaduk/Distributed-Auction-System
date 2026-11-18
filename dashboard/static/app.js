@@ -142,6 +142,7 @@ function render(d) {
   renderEvents(d, first);
   renderScenario(d);
   renderModeSwitch(d);
+  renderNetwork(d);
   S.pollAt = performance.now();
   for (const n of d.nodes) S.prevStatus[n.node_id] = n.status ? { ...n.status, process: n.process } : { process: n.process };
 }
@@ -181,12 +182,21 @@ function buildTopology(nodes) {
   const pos = {};
   nodes.forEach((n, i) => { pos[n.node_id] = POS3[i] || [100 + i * 150, 170]; });
   const edges = svg("g", {}, root);
-  const edgeEls = {};
+  const edgeEls = {}, cutMarks = {};
   const ids = nodes.map(n => n.node_id);
   for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
     const [a, b] = [ids[i], ids[j]];
     edgeEls[`${a}|${b}`] = edgeEls[`${b}|${a}`] = svg("line", {
       class: "edge", x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1] }, edges);
+    // A wide invisible line on top: the click target for cutting / restoring the link.
+    const hit = svg("line", { class: "edge-hit", x1: pos[a][0], y1: pos[a][1], x2: pos[b][0], y2: pos[b][1] }, edges);
+    const title = svg("title", {}, hit); title.textContent = `Click to cut or restore the link ${a}-${b}`;
+    hit.addEventListener("click", () => toggleLink(a, b));
+    const mx = (pos[a][0] + pos[b][0]) / 2, my = (pos[a][1] + pos[b][1]) / 2;
+    const mark = svg("g", { class: "cut-mark", transform: `translate(${mx} ${my})` }, edges);
+    svg("rect", { x: -18, y: -10, width: 36, height: 20, rx: 4 }, mark);
+    const t = svg("text", { y: 1 }, mark); t.textContent = "cut";
+    cutMarks[`${a}|${b}`] = cutMarks[`${b}|${a}`] = mark;
   }
   const pulses = svg("g", {}, root);
   const groups = {};
@@ -206,7 +216,7 @@ function buildTopology(nodes) {
     const meta2 = svg("text", { class: "node-meta", y: R.halo + 34 }, g);
     groups[id] = { g, ring, body, role, meta, meta2 };
   }
-  S.topo = { pos, edgeEls, pulses, groups, key: ids.join(",") };
+  S.topo = { pos, edgeEls, cutMarks, pulses, groups, key: ids.join(",") };
 }
 
 function nodeClass(n) {
@@ -221,7 +231,10 @@ function renderTopology(d) {
   for (const n of d.nodes) {
     const G = T.groups[n.node_id], s = n.status, cls = nodeClass(n);
     G.g.setAttribute("class", `node-g ${cls}`);
-    G.role.textContent = cls === "dead" ? "killed" : cls === "suspended" ? "frozen" : cls === "unknown" ? "no answer" : cls.toLowerCase();
+    const stale = s && s.role === "LEADER" && n.node_id !== d.leader;
+    G.role.textContent = cls === "dead" ? "killed" : cls === "suspended" ? "frozen" : cls === "unknown" ? "no answer"
+      : stale ? "old leader" : cls.toLowerCase();
+    G.g.classList.toggle("stale", !!stale);
     G.meta.textContent = s ? `term ${s.term} · log ${s.last_log_index}` : (n.process === "dead" ? "process dead" : "not answering");
     G.meta2.textContent = s ? `commit ${s.commit_index} · applied ${s.last_applied}` : "";
     const prev = S.prevStatus[n.node_id];
@@ -231,8 +244,10 @@ function renderTopology(d) {
     const [a, b] = k.split("|");
     const na = d.nodes.find(n => n.node_id === a), nb = d.nodes.find(n => n.node_id === b);
     const alive = n => n && n.status && n.process === "up";
-    const live = d.leader && (a === d.leader || b === d.leader) && alive(na) && alive(nb);
-    line.setAttribute("class", "edge" + (live ? " live" : "") + (!alive(na) || !alive(nb) ? " cut" : ""));
+    const severed = isCut(d, a, b);
+    const live = !severed && d.leader && (a === d.leader || b === d.leader) && alive(na) && alive(nb);
+    line.setAttribute("class", "edge" + (live ? " live" : "") + (!alive(na) || !alive(nb) ? " cut" : "") + (severed ? " severed" : ""));
+    T.cutMarks[k].style.display = severed ? "" : "none";
   }
   const up = d.nodes.filter(n => n.status).length, need = Math.floor(d.nodes.length / 2) + 1;
   const q = $("#quorum");
@@ -240,6 +255,32 @@ function renderTopology(d) {
   q.innerHTML = "";
   q.append(el("b", null, up < need ? "No quorum" : `${up}/${d.nodes.length} up`),
            el("span", null, up < need ? `need ${need} of ${d.nodes.length}` : `majority ${need}`));
+}
+
+function isCut(d, a, b) {
+  return (d.cut_links || []).some(([x, y]) => (x === a && y === b) || (x === b && y === a));
+}
+
+async function toggleLink(a, b) {
+  const cut = !isCut(S.data || {}, a, b);
+  try { const r = await api("/api/network/link", { a, b, cut }); toast(r.message, "ok"); }
+  catch (e) { toast(e.message, "err"); }
+}
+
+function setupNetwork() {
+  document.querySelectorAll("[data-net]").forEach(b => b.addEventListener("click", () => withBusy(b, async () => {
+    try { const r = await api("/api/network/preset", { name: b.dataset.net }); toast(r.message, "ok"); }
+    catch (e) { toast(e.message, "err"); }
+  })));
+}
+
+function renderNetwork(d) {
+  const n = (d.cut_links || []).length;
+  const label = $("#net-state");
+  if (label) {
+    label.textContent = n ? `${n} link${n > 1 ? "s" : ""} cut` : "all links up";
+    label.className = "net-state" + (n ? " bad" : "");
+  }
 }
 
 function sendPulse(from, to, kind = "", ms = 380, onArrive) {
@@ -342,7 +383,9 @@ function renderNodes(d) {
     if (!ref) { ref = buildNodeCard(n); S.nodeCards.set(n.node_id, ref); box.appendChild(ref.c); }
     const s = n.status, cls = nodeClass(n);
     ref.c.className = `ncard ${cls}`;
-    ref.role.textContent = s ? s.role : "—"; ref.role.className = `badge role ${s ? s.role : ""}`;
+    const oldLeader = s && s.role === "LEADER" && n.node_id !== d.leader;
+    ref.role.textContent = s ? (oldLeader ? "LEADER (old term)" : s.role) : "—";
+    ref.role.className = `badge role ${s ? (oldLeader ? "stale" : s.role) : ""}`;
     ref.proc.textContent = n.process; ref.proc.className = `badge proc ${n.process}`;
     ref.pid.textContent = s ? `pid ${s.pid} · start #${n.starts}` : `ports ${n.client_port}/${n.peer_port}`;
     const K = ref.k;
@@ -1009,5 +1052,6 @@ renderAccount();
 setupCreateForm();
 setupScenarios();
 setupModeSwitch();
+setupNetwork();
 poll();
 requestAnimationFrame(frame);

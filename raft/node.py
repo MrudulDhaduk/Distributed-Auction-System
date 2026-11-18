@@ -176,6 +176,7 @@ class NodeStatus:
     heartbeat_interval: float = 0.0
     election_timeout: tuple = (0.0, 0.0)
     prevote: bool = False                       # PreVote on (thesis 9.6)?
+    blocked_peers: tuple = ()                   # links cut by the operator (simulated partition)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -281,6 +282,15 @@ class RaftNode:
         self._prevote_term: Optional[int] = None  # the term being asked about
         self._last_leader_contact: Optional[float] = None  # monotonic; a current-term AppendEntries
 
+        # Simulated network partition (the dashboard's link switches). Raft
+        # RPCs to or from a peer in this set are lost, in both directions,
+        # exactly as if the cable were cut: outgoing calls fail with
+        # TransportError before leaving, incoming ones are refused the same
+        # way. No Raft rule reads this set; it only removes messages, which
+        # Raft must already tolerate. Volatile: a restarted node starts with
+        # every link up.
+        self._blocked: frozenset = frozenset()
+
         # Read-index (section 8; see read_index). Leader only, reset in
         # _become_leader except the round counter, which only ever grows.
         self._term_start_index = 0  # index of this term's no-op
@@ -379,7 +389,20 @@ class RaftNode:
                 heartbeat_interval=self._heartbeat_interval,
                 election_timeout=self._election_timeout,
                 prevote=self._prevote,
+                blocked_peers=tuple(sorted(self._blocked)),
             )
+
+    def set_blocked_peers(self, peers) -> None:
+        """Cut the links to `peers` (and restore every other one)."""
+        peers = frozenset(p for p in peers if p in self._peers)
+        with self._lock:
+            if peers != self._blocked:
+                log.info("[%s] links cut to: %s", self.node_id, ", ".join(sorted(peers)) or "none")
+            self._blocked = peers
+
+    def _check_link(self, peer: str):
+        if peer in self._blocked:
+            raise TransportError(f"{self.node_id} <-> {peer}: link cut")
 
     def set_prevote(self, on: bool) -> None:
         """Switch PreVote on or off. Safe at any time: it only changes how
@@ -770,6 +793,7 @@ class RaftNode:
 
     def handle_request_vote(self, args: RequestVoteArgs) -> RequestVoteReply:
         """Figure 2, "RequestVote RPC", receiver implementation."""
+        self._check_link(args.from_id)
         with self._lock:
             if args.pre_vote:
                 return self._answer_prevote(args)
@@ -818,6 +842,7 @@ class RaftNode:
 
     def handle_append_entries(self, args: AppendEntriesArgs) -> AppendEntriesReply:
         """Figure 2, "AppendEntries RPC", receiver implementation, steps 1-5."""
+        self._check_link(args.from_id)  # a cut link: the request never arrived
         with self._lock:
             self._step_down_if_stale(args.term, f"AppendEntries from {args.from_id}")
 
@@ -931,6 +956,7 @@ class RaftNode:
 
     def _send_vote_request(self, peer: str, args: RequestVoteArgs):
         try:
+            self._check_link(peer)
             reply = self._transport.request_vote(peer, args)
         except TransportError as e:
             log.debug("[%s] RequestVote to %s lost: %s", self.node_id, peer, e)
@@ -976,6 +1002,7 @@ class RaftNode:
 
     def _send_append(self, peer: str, args: AppendEntriesArgs):
         try:
+            self._check_link(peer)
             reply = self._transport.append_entries(peer, args)
         except TransportError as e:
             log.debug("[%s] AppendEntries to %s lost: %s", self.node_id, peer, e)

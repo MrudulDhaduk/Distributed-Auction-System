@@ -38,6 +38,13 @@
       <div class="cluster-wrap">
         <svg id="topology" viewBox="0 0 640 390" role="img" aria-label="Cluster topology"></svg>
         <div class="quorum" id="quorum"></div>
+        <div class="net-bar">
+          <span class="net-state" id="net-state">all links up</span>
+          <span class="hint">Click a line to cut or restore that link.</span>
+          <button class="btn small" data-net="isolate_leader">Isolate leader</button>
+          <button class="btn small" data-net="isolate_follower">Isolate a follower</button>
+          <button class="btn small" data-net="heal">Heal network</button>
+        </div>
       </div>
       <div class="nodes" id="nodes"></div>
     </div>

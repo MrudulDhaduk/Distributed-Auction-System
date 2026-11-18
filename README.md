@@ -333,6 +333,9 @@ background.
 - **Account** (right). Log in (one-click buttons for the test users, password
   `pass`) or **Create account**. Each browser **tab** is its own session, so
   two tabs can be two different users side by side.
+- **Network bar** (under the triangle): click a line to cut or restore that
+  link, or use **Isolate leader**, **Isolate a follower**, **Heal network**.
+  See [Partitions](#partitions-cut-the-links-between-nodes) below.
 - **Raft mode** (switch in the Cluster header): **Classic Raft** or
   **PreVote**. See [PreVote](#prevote-classic-raft-vs-the-improvement) below.
 - **New auction**. Item, duration (30 s to 1 h, or custom 15 s to 30 days),
@@ -432,6 +435,48 @@ and `apply()` refuses anyone else whatever client they use. Checked on
 2026-11-18: a non-winner paying, a second payment, the seller releasing
 before payment, and a non-seller releasing were each refused, and pay, then
 release, ended in RELEASED; pay, then refund, ended in REFUNDED.
+
+### Partitions: cut the links between nodes
+
+Under the triangle there is a network bar. **Click any line between two
+nodes** to cut that link; click it again to restore it. A cut link turns red
+and shows `cut`. With three links you can make any shape: one node alone,
+the leader alone, or a single cut link with everyone still connected through
+the third node. The bar also has **Isolate leader**, **Isolate a follower**
+and **Heal network**. A scenario heals the network before its checker runs.
+
+What a cut does: each node keeps a list of peers it is cut off from, and Raft
+messages to or from them are dropped in both directions, as if the cable were
+unplugged (`raft/node.py` `set_blocked_peers`, switched over
+`StatusService.SetBlockedPeers`). The client ports are not cut, so clients
+can still reach every node, which is what makes the cut-off leader visible.
+
+Try **Isolate leader**, then bid:
+
+1. The two connected nodes stop hearing the leader, elect a new one in a
+   higher term, and carry on.
+2. The cut-off node still says it is the leader: the page shows it as
+   **old leader** (dashed) with `LEADER (old term)` on its card, and its
+   commit index stops moving. Two leaders at once, in different terms; only
+   the one with a majority can commit.
+3. A bid sent to the old leader is accepted into its log but cannot commit.
+   The client gets "outcome unknown" after the commit timeout and retries on
+   another node with the same serial number, where it commits.
+4. **Heal network**: the old leader sees the higher term, steps down, and its
+   uncommitted entry is replaced by the new leader's log. The bid is in the
+   state exactly once.
+
+Measured on 2026-11-18: n3 (leader, term 1) isolated; n2 became leader in
+term 3 while n3 still reported LEADER in term 1 with its commit index stuck;
+a bid sent during the partition answered after 5.2 s (first the old leader,
+then the retry on n2); after healing n3 was a follower in term 3, all three
+at the same commit index, and the bid was in the state once. Cutting only
+n1-n2 kept writes working (both still reach n3), at the cost of a few
+elections in Classic mode. With **PreVote** on, an isolated follower does not
+raise its term while cut off (`tests/test_raft_partition.py`).
+
+It is a simulated partition: one machine, processes dropping each other's
+messages in software, and clients are never cut off.
 
 ### A ten-minute walkthrough (by hand)
 
@@ -536,7 +581,7 @@ refused bidder must really be the seller). Tests:
   (for example `test_workload.py`, `test_failover_grpc.py`,
   `test_serve_grpc.py`, `test_harness.py`). Don't run the suite during a chaos
   run (testing-and-chaos.md Known gaps 13).
-- Last full run (2026-11-18, after PreVote): 764 passed, 3 xfailed in 134 s. The 3 xfails are strict xfails: the
+- Last full run (2026-11-18, after partitions): 783 passed, 3 xfailed. The 3 xfails are strict xfails: the
   persistence tests run against MemoryStorage, to prove those tests can fail
   (decisions.md P13).
 - `pytest.ini` sets `--capture=sys`. With pytest's default capture a gRPC log
@@ -647,9 +692,11 @@ paper section in brackets).
 Copied from the Known-gaps sections of the walkthroughs. The full lists are
 there.
 
-- **Crash faults only.** Every injected fault is a process kill or suspend on
-  one machine. There are no network partitions between real processes, no
-  clock skew, no disk faults, and no Byzantine behaviour. Clients and servers
+- **Crash faults and simulated partitions only.** The chaos harness injects
+  process kills and suspends on one machine; the dashboard can also cut Raft
+  links between nodes (messages dropped in software, clients never cut off).
+  There are no real network failures, no clock skew, no disk faults, and no
+  Byzantine behaviour. Clients and servers
   share one clock, which one checker rule relies on
   ([testing-and-chaos.md](docs/testing-and-chaos.md) gaps 4 and 2). On
   Windows, power loss right after a rename could roll back a vote
