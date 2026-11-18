@@ -342,7 +342,7 @@ Live, with real processes, kill the leader by closing its window:
 ## 6. Known gaps
 
 Things this chunk knowingly does not do. Each is a later build-order step or a
-deliberate scope cut. None is fixed here.
+deliberate scope cut. None is fixed here; the ones closed by later steps say so.
 
 1. **`currentTerm` and `votedFor` are in memory only (step 6).**
    Figure 2 marks them *persistent*, "updated on stable storage before
@@ -361,11 +361,13 @@ deliberate scope cut. None is fixed here.
    in the trace: n1 came back at term 0.
    Fix (step 6): write `currentTerm` and `votedFor` to disk and fsync *before*
    sending the reply that depends on them.
+   **Closed in step 6:** [raft-persistence.md](raft-persistence.md) (P8).
 
 2. **No log, so the up-to-date check is untested against real logs.**
    `last_log` is injected and defaults to `(0, 0)`; the rule itself is proven
    by unit tests only. `AppendEntries` rule 2 is the trivial empty-log version,
    `entries` is never converted on the wire, `matchIndex` is always 0 (steps 4-5).
+   **Closed in steps 4-5:** [raft-replication.md](raft-replication.md).
 
 3. **No CheckQuorum / pre-vote.** A leader cut off from the majority keeps
    believing it leads (a test asserts exactly that) and keeps its term; an
@@ -373,6 +375,8 @@ deliberate scope cut. None is fixed here.
    inflated term deposes a healthy leader (Ongaro's thesis, §9.6, fixes both).
    Safety is unaffected (a deposed leader is never *wrong*, just disruptive);
    availability takes a hit.
+   **Pre-vote added later** as a switchable mode (`tests/test_raft_prevote.py`;
+   README, "PreVote"). CheckQuorum is still not implemented.
 
 4. **Timeouts are reasoned, not measured.** The 0.5-1.0 s / 0.1 s defaults are
    derived in decisions.md, not benchmarked under load. A stall of more than about
@@ -382,6 +386,9 @@ deliberate scope cut. None is fixed here.
 5. **The in-memory network is too polite.** Synchronous, instant, no delay,
    reordering, duplication or message loss other than whole-node drops and
    partitions. The step-7 chaos harness has to extend it.
+   **Addressed in step 7:** real processes, kills and suspends
+   ([testing-and-chaos.md](testing-and-chaos.md)); the dashboard can also cut
+   links between nodes.
 
 6. **Tests use the real clock.** Bounds are generous and the suite was repeated
    (12 clean runs, one under heavy CPU load), but there is no injectable clock

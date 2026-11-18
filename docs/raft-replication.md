@@ -588,6 +588,7 @@ unused `last_logs` parameter.
 4. **No client deduplication (§8).** `LEADERSHIP_LOST` means "unknown"; a
    client that retries can get its command into the log twice. `apply()` has
    to tolerate that, or client ids/sequence numbers are needed.
+   **Closed later:** the §8 dedupe table (decisions.md A5).
 5. **No CheckQuorum (§9.6 of Ongaro's thesis).** A leader that has been
    partitioned away keeps accepting `propose()` calls. They stay pending until
    it hears a higher term (`test_a_proposal_whose_entry_is_overwritten_never_succeeds`
@@ -597,9 +598,12 @@ unused `last_logs` parameter.
 7. **No client-facing RPC.** `propose()` is a Python call. It goes over gRPC
    when the auction is wired in (next chunks), along with redirecting via
    `leader_hint`.
+   **Closed later:** [auction-on-raft.md](auction-on-raft.md).
 8. **No read path.** `GetAuction` / `ListAuctions` on a follower would read
    possibly stale state. Linearizable reads (§8) need the no-op (done now) *and*
    a leadership check before answering (not done).
+   **Closed later:** leader-only reads behind read-index (decisions.md A14,
+   A15; [auction-on-raft.md](auction-on-raft.md) §9).
 9. **Inputs are trusted.** A malformed AppendEntries (for example a negative
    `prevIndex`, or an unknown entry kind, which raises in `wire.py`) isn't
    validated. Same as election gap 8.
@@ -608,6 +612,7 @@ unused `last_logs` parameter.
     itself never delays, duplicates or reorders. The test-only `Gate` can lose
     messages selectively, but it's not a general chaos tool. That's the step 7
     chaos harness.
+    **Addressed in step 7:** [testing-and-chaos.md](testing-and-chaos.md).
 11. **Tests use the real clock** (unchanged from the election chunk).
 
 ---

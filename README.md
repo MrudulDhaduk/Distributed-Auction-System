@@ -16,9 +16,10 @@ Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirement
 **Who wrote what.** The M1 code (`auction/state.py`'s `apply()` and commands,
 gRPC, auth and sessions, the closer, the LLM server) was written by the author.
 Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`). The M2 code (Raft,
-persistence, replication, the harness and checker, and this chunk's payment and
-LLM wiring) was built with an AI coding assistant, one chunk at a time, under the author's
-review: each chunk was studied, discussed and committed by the author.
+persistence, replication, the harness and checker, payment, the LLM wiring and
+the web dashboard) was built with an AI coding assistant, one chunk at a time,
+under the author's review: each chunk was studied, discussed and committed by
+the author.
 
 ---
 
@@ -173,13 +174,10 @@ Measured on 2026-11-17: **Vintage clock** with a leader kill and restart
 mid-run, 18 writes, all 10 properties PASS. **Four auctions** with a leader
 kill, a follower suspend/resume and a restart mid-run, 897 writes, all 10 PASS.
 **Chaos workload**, 60 s with automatic faults (3 leader kills, 3 suspends),
-771 writes, all 10 PASS (after the checker learned the create refusal below).
-
-The first chaos run found a checker gap: a seller's create, retried across a
-leader kill for longer than the auction's lifetime, reached the new leader
-after its own close time and was correctly refused ("The close time must be
-in the future"), but the checker did not know that reason. It now accepts it
-only if the close time really had passed when the reply came.
+771 writes, all 10 PASS. (A create retried across a leader kill for longer
+than the auction's lifetime is correctly refused with "The close time must be
+in the future"; the checker accepts that refusal only if the close time really
+had passed when the reply came.)
 
 The checker reads the whole replicated state, so anything you did by hand in
 the same cluster is checked as well.
@@ -363,37 +361,12 @@ refused bidder must really be the seller). Tests:
 
 ---
 
-## Running from the terminal
+## Without the browser
 
-Everything the dashboard does can also be run without a browser. These use
-the same ports as the dashboard, so run one or the other.
-
-**A cluster in separate windows.**
-
-```powershell
-.\scripts\run_cluster.ps1            # LLM server + n1, n2, n3, one window each
-.\scripts\run_cluster.ps1 -NoLLM     # without the LLM server
-.\scripts\run_cluster.ps1 -DryRun    # print the command lines only
-```
-
-Each node keeps its term, vote and log in `data\<id>`. Kill the leader by
-closing its window; restart a node with its line from `-DryRun` and it replays
-its log from disk and catches up.
-
-**The command-line client.**
-
-```powershell
-.venv\Scripts\python.exe -m client.auction_client
-```
-
-Four logins, one auction ("vintage clock", closes in 25 s), bids of 150 and
-200 and an equal 200 that is refused, then the final result. It follows leader
-redirects and retries with the same `(client_id, seq)`, so you can close the
-leader's window mid-run and watch it fail over. Seeded accounts: `mrudul`,
-`nisarg`, `karan`, `tanmay`, password `pass`; more can be registered.
-
-**From Python**, with the handout's client functions (`login`, `logout`,
-`post`, `get`, `process_business_request`):
+The dashboard is the main way to run and demo the system. The same cluster
+can be used from code with the handout's client functions (`login`, `logout`,
+`post`, `get`, `process_business_request`), against a running dashboard or
+`.\scripts\run_cluster.ps1` (same ports, so run one or the other):
 
 ```python
 c = ClusterClient(["127.0.0.1:50071", "127.0.0.1:50072", "127.0.0.1:50073"])
@@ -410,22 +383,10 @@ c.get(c.token, "price_trends", {})
 `refund`), `description`. `get` types: `auction`, `auctions`, `escrow`,
 `assistant`, `price_trends`. `process_business_request(request_id, payload,
 context)` calls the server's `BusinessService.ProcessBusinessRequest`, which
-dispatches to the same handlers.
-
-**The scripted demo and its replay.**
-
-```powershell
-.\scripts\demo.ps1 -Pause 4
-.venv\Scripts\python.exe scripts\replay.py runs\demo-<time>      # then open runs\demo-<time>\replay.html
-```
-
-The script starts the cluster, creates four auctions, runs six background
-bidders, kills the leader twice under load, settles the escrows, shows price
-trends and runs the checker (all ten properties PASS on 2026-11-10, with the
-real model). Every run is recorded to `events.jsonl`, and `replay.py` turns it
-into one self-contained page with a timeline. Minute-by-minute script:
-[docs/demo-runsheet.md](docs/demo-runsheet.md).
-(`scripts\dashboard.py` is an older terminal view of the same node status.)
+dispatches to the same handlers. Seeded accounts: `mrudul`, `nisarg`, `karan`,
+`tanmay`, password `pass`. `.venv\Scripts\python.exe -m client.auction_client`
+runs a short scripted session (four logins, one auction, an equal-bid race)
+that follows leader redirects, so you can kill the leader mid-run.
 
 **Notes.** The LLM server runs on port 50052; every call from a node carries a
 25 s deadline, and the first call after Ollama loads the model takes about
@@ -608,9 +569,7 @@ and their numbers are reproduced in the `docs\` files.
 | Failover, 0.15-0.15 s, no randomness (10 kills) | `t_elect` p50 11.6 s; 5 of 10 kills had no leader within 30 s; 1 866 terms | `runs\stress-20261109-234519\results.json`; [docs/stress-results.md](docs/stress-results.md) |
 | Chaos run, seed 634526, 600 s | 58 faults; 11 256 writes (8 957 accepted bids, 2 137 rejected, 88 unknown, of which 3 committed once each); 63 auctions, all closed; all three nodes at `digest_index` 11 293; **all 8 properties PASS**, exit 0 | `runs\chaos-final2.out`, `runs\chaos-634526-20261110-104604\`; [docs/testing-and-chaos.md](docs/testing-and-chaos.md) §6 |
 | Bid latency under that chaos run | p50 8.1 ms, p95 145 ms, max 5.65 s (unknowns excluded) | [docs/testing-and-chaos.md](docs/testing-and-chaos.md) §6; recomputed from `history.jsonl` |
-| Earlier chaos run, seed 737075, 600 s | 58 faults; 8 247 writes; all 8 properties PASS (made before the T16 fix, so latencies are inflated) | [docs/testing-and-chaos.md](docs/testing-and-chaos.md) §6 |
 | Chaos run with payments, seed 396704, 600 s, `--fake-llm` | 57 faults; 11 978 writes: 11 719 bids (9 674 accepted, 1 982 rejected, 63 unknown), 69 creates, 12 logins, payments (64 accepted, 36 refused) and settlements (54 releases and 10 refunds accepted, 14 refused); 69 auctions, all closed, all with a summary; escrow RELEASED 54, REFUNDED 10, NONE 5; all three nodes at `digest_index` 12 099; **all 10 properties PASS**, exit 0 | `runs\chaos-396704-20261110-125757\`; [docs/testing-and-chaos.md](docs/testing-and-chaos.md) §6.1 |
-| Aborted chaos run, seed 79402 | no verdict: the harness killed itself at 562 s (PID reuse, decisions.md T19). Not a system failure, and no checker ran | same |
 
 Why the client waits ~2.2 s when Raft needs ~0.9 s: Windows takes 2.0 s to
 refuse a TCP connect to a dead localhost port, and the client's first retry
@@ -678,7 +637,7 @@ there.
   Windows, power loss right after a rename could roll back a vote
   ([raft-persistence.md](docs/raft-persistence.md) gap 1, decisions.md P3).
   That was not tested.
-- **`apply()` costs O(bids) per bid.** M1's `max(...)` scans the auction's bid
+- **`apply()` costs O(bids) per bid.** Its `max(...)` scans the auction's bid
   list. Measured: 0.15 ms at 1 000 bids, 2.85 ms at 25 000. The stress writer
   starts a new auction every 1 000 bids for this reason
   ([testing-and-chaos.md](docs/testing-and-chaos.md) gap 10).
@@ -698,19 +657,14 @@ there.
   mode fixes it; it is off by default so the code still matches the paper's
   Figure 2 unless you switch it on. The §6 rule is not implemented.
 - **The chaos run's LLM was a canned-answer server.** The FAQ and price-trend
-  reads are covered by unit and gRPC tests and the demo, not by chaos. (The
-  chaos workload does read now: payers read `GetAuction`, sellers `GetEscrow`.)
+  reads are covered by unit and gRPC tests and the demo, not by chaos. The
+  chaos workload does read: payers read `GetAuction`, sellers `GetEscrow`.
 - **The peer port is plain TCP with no auth.** Session tokens are stored in
   plain text in `log.bin` ([auction-on-raft.md](docs/auction-on-raft.md) §15).
 - **Anti-sniping is a rule inside `PlaceBid`, not a separate `ExtendAuction`
   command,** and it is opt-in per auction (the chaos workload and the
   scenarios do not use it: their bidders bid until the close, so it would
   keep extending up to the cap).
-- **Logs from before the validation rules replay differently.** The seller
-  rule and the create checks are in `apply()`, so a `data\` directory written
-  earlier, in which a seller bid on their own auction, now replays that bid as
-  refused (the same on every node, so the replicas still agree, but not what
-  was acknowledged then). Wipe old data first: `Remove-Item -Recurse data`.
 - **The web dashboard's view is the leader's local state** (`DumpState`, not a
   read-index read), refreshed 3 times a second, and its heartbeat counters are
   each node's own and reset when a node restarts. Pulses are drawn from
@@ -735,7 +689,6 @@ there.
   field on the server. It dispatches to the typed handlers behind the same auth
   and leader rules; the typed RPCs are the primary API (decisions.md C19).
 - Chaos runs are seeded but not deterministic, because they use real processes and wall-clock time. A deterministic simulator on a virtual clock is the natural next step.
-- **The demo's second leader kill is not under background load.** The hero auction closes last and its payment waits for that close, so every background auction has already closed when the second kill happens. The demo reports that stall as n/a.
 - **The background bidders are clients on one machine,** about 17 bids a second in the steady state. They are not a load test.
 
 ---
@@ -754,6 +707,7 @@ there.
 | [docs/stress-results.md](docs/stress-results.md) | throughput, latency, failover vs. the paper's Figure 16 |
 | [docs/decisions.md](docs/decisions.md) | every non-obvious choice, with the viva question |
 | [docs/design-notes.md](docs/design-notes.md) | M1 notes: the close loop, the LLM model choice |
+| [docs/demo-runsheet.md](docs/demo-runsheet.md) | the scripted terminal demo (`scripts\demo.ps1`), minute by minute |
 
 ---
 
