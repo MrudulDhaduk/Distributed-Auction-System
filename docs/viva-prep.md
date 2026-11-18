@@ -151,7 +151,7 @@ timing, only availability does.
 E1; [stress-results.md](stress-results.md) "Finding". The client still sees
 ~2.2 s because of the Windows connect refusal (T18).
 
-**14. How do you keep `apply()` deterministic?** (CLAUDE.md constraint;
+**14. How do you keep `apply()` deterministic?** (working-rules constraint;
 State Machine Safety)
 Everything non-deterministic happens once, on the leader, before proposing,
 and travels in the command as data. The bid time is stamped in the handler,

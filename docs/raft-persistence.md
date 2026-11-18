@@ -506,8 +506,8 @@ cluster tests tolerate. A >5 s stall would fail a wait.
    safety one.
 10. **Not wired to the auction yet.** Replay calls `apply_fn` from index 1 on
     restart, so the auction state machine must be built empty at boot and must
-    be deterministic (it is: CLAUDE.md constraints). `SessionStore` is still not
-    replicated, so tokens don't survive a restart (CLAUDE.md seams).
+    be deterministic (it is: working-rules constraints). `SessionStore` is still not
+    replicated, so tokens don't survive a restart (working-rules seams).
 11. **The trace over gRPC has only no-ops** (no client RPC yet; replication gap 7).
 
 ---

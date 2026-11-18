@@ -218,7 +218,6 @@ __marimo__/
 .streamlit/secrets.toml
 Learning/dataclass.py
 Learning/Threading.py
-CLAUDE.md
 My words.txt
 papers/
 

@@ -59,7 +59,7 @@ message RequestVoteResponse {
 // One log entry (Figure 2: "each entry contains command for state machine,
 // and term when entry was received by leader"). `command` is opaque bytes:
 // the Raft layer never looks inside (raft.messages.LogEntry calls it
-// `data`), and (CLAUDE.md) LLM output only ever enters the log as already-
+// `data`), and (working rules) LLM output only ever enters the log as already-
 // generated plain data.
 // COMMAND entries carry a client's opaque payload for apply_fn. NOOP is
 // Raft's own entry: a new leader appends one at the start of its term

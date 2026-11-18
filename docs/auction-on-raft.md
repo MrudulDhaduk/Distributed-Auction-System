@@ -184,7 +184,7 @@ leader committed (trace in section 7).
 Resolving **seam 3**: "SessionStore is not replicated. After leader failover,
 every token is unknown to the new leader."
 
-**The rule** is CLAUDE.md's own: no randomness inside `apply()`. A token is
+**The rule** is the working rules' own: no randomness inside `apply()`. A token is
 random, so it is minted **outside**, on the leader, *before* proposing, and the
 result is replicated as data. This is the same pattern as the LLM description.
 
@@ -354,7 +354,7 @@ Step by step:
 
 ## 8. The M1 files this chunk changed, and why
 
-CLAUDE.md marks `auction/state.py`, `server/`, `sessions/` and `llm_server/`
+The working rules mark `auction/state.py`, `server/`, `sessions/` and `llm_server/`
 "handle with care".
 
 | file | changed? | what and why |
@@ -378,7 +378,7 @@ which applied directly, with naive datetimes. Every M1 case survives as a
 `test_auction_servicer.py`, `test_session_store.py`, `test_auth_interceptor.py`,
 `test_close_auction.py`, `test_concurrent_bidding.py`.
 
-**An M1 bug found, not fixed** (CLAUDE.md: "point at the line and the case it
+**An M1 bug found, not fixed** (working rules: "point at the line and the case it
 breaks on"). `common/time_conv.py:25`, `return int(dt.timestamp() *
 MICROS_PER_SECOND)`, does float arithmetic and then truncates. For
 `2039-12-20 05:40:54.254810` the float is `2207972454254809.8`, which
@@ -629,7 +629,7 @@ told **no** about a bid that was in fact placed.
 
 ## 12. The five M1 → M2 seams
 
-| # | seam (CLAUDE.md) | resolved by | where |
+| # | seam (working rules) | resolved by | where |
 |---|---|---|---|
 | 1 | The closer calls `apply(CloseAuction)` on every node | Runs everywhere, proposes only on the leader, stamped with the leader's clock, one close in flight; `apply()` rejects duplicates | §6, A7, `server/closer.py:92` |
 | 2 | Handlers call `apply()` directly; PlaceBid reads the high bid after | `check_leader → (LLM) → stamp → submit → wait`; the high bid comes from `Applied` | §2, §4, A8, A10 |
