@@ -380,7 +380,12 @@ or you stop it, the dashboard:
 4. shows PASS / FAIL for each property on the card, with the first piece of
    evidence for a failure, and saves the run (history, dumps, report) in
    `runs\dashboard-<time>\scenario-<n>-<name>\`. Re-check it any time with
-   `.venv\Scripts\python.exe -m checker runs\dashboard-<time>\scenario-<n>-<name>`.
+   `.venv\Scripts\python.exe -m checker runs\dashboard-<time>\scenario-<n>-<name>`;
+5. builds a **replay** of the run and shows an **Open replay** link. The
+   replay is the same page `scripts\replay.py` makes for the scripted demo:
+   a timeline with every step, your kills and restarts, elections, bids,
+   closes, escrow changes and the checker result, playable at 0.5x to 5x. It
+   is saved as `replay.html` in the run's folder, next to `events.jsonl`.
 
 Measured on 2026-11-17: **Vintage clock** with a leader kill and restart
 mid-run, 18 writes, all 10 properties PASS. **Four auctions** with a leader
@@ -594,7 +599,7 @@ refused bidder must really be the seller). Tests:
   (for example `test_workload.py`, `test_failover_grpc.py`,
   `test_serve_grpc.py`, `test_harness.py`). Don't run the suite during a chaos
   run (testing-and-chaos.md Known gaps 13).
-- Last full run (2026-11-18, after anti-sniping): 788 passed, 3 xfailed. The 3 xfails are strict xfails: the
+- Last full run (2026-11-18, after replays): 791 passed, 3 xfailed. The 3 xfails are strict xfails: the
   persistence tests run against MemoryStorage, to prove those tests can fail
   (decisions.md P13).
 - `pytest.ini` sets `--capture=sys`. With pytest's default capture a gRPC log

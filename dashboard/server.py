@@ -126,6 +126,7 @@ class Dashboard:
         self._leaders = set()                                 # (term, node) LEADER sightings, for the checker
         self.scenario = None                                  # the current or last ScenarioRun
         self._scenario_no = 0
+        self._scenario_dirs = {}                              # number -> run dir (for replays)
         self.prevote = False                                  # desired Raft mode on every node
         self.cut_links = set()                                # {frozenset({a, b})}: simulated partition
 
@@ -297,6 +298,9 @@ class Dashboard:
                     self._pool.submit(self._set_prevote_on, nid, self.prevote)
                 if s is not None and s["blocked_peers"] != self._blocked_for(nid):
                     self._pool.submit(self._set_blocked_on, nid, self._blocked_for(nid))
+            run = self.scenario
+            if run is not None and run.is_alive():
+                run.on_status(view)
 
     def _status_events(self, view, leader):
         for nid, s in view.items():
@@ -314,6 +318,9 @@ class Dashboard:
                     self.event("election", f"{nid} candidate, term {s['term']}", node=nid)
                 elif s["role"] == "LEADER":
                     self.event("leader", f"{nid} leader, term {s['term']}", node=nid)
+                    run = self.scenario
+                    if run is not None and run.is_alive():
+                        run.record("election", leader=nid, term=s["term"])
                 elif prev["role"] == "LEADER":
                     self.event("election", f"{nid} stepped down, term {s['term']}", node=nid)
         self._prev_nodes = view
@@ -480,6 +487,15 @@ class Dashboard:
                 raise Invalid(f"{nid} is {state}, not suspended")
             node.resume()
             self.event("resume", f"resumed {nid}", node=nid)
+        run = self.scenario
+        if run is not None and run.is_alive():
+            with self._lock:
+                term = (self.nodes.get(nid) or {}).get("term")
+            if action == "kill":
+                run.record("kill", node=nid, term=term)
+            elif action == "restart":
+                run.record("restart", node=nid)
+            run.say(f"you: {action} {nid}" + (" (leader)" if was_leader else ""))
         return {"ok": True, "message": f"{action}: {nid}", "process": node.state}
 
     # --- scenarios -------------------------------------------------------------------
@@ -508,6 +524,7 @@ class Dashboard:
             faults = payload.get("faults") is True
         self._scenario_no += 1
         run = ScenarioRun(self, name, self._scenario_no, duration=duration, faults=faults)
+        self._scenario_dirs[run.number] = run.run_dir
         self.scenario = run
         run.start()
         return {"ok": True, "message": f"started {run.title}"}
@@ -704,6 +721,20 @@ def make_handler(dash: Dashboard):
             self.end_headers()
             self.wfile.write(data)
 
+        def _replay(self, number):
+            run_dir = dash._scenario_dirs.get(int(number)) if number.isdigit() else None
+            full = os.path.join(run_dir, "replay.html") if run_dir else None
+            if not full or not os.path.isfile(full):
+                self._send(HTTPStatus.NOT_FOUND, {"error": "no replay for that run (yet)"})
+                return
+            with open(full, "rb") as f:
+                data = f.read()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _session_id(self):
             return self.headers.get("X-Session") or None
 
@@ -711,6 +742,8 @@ def make_handler(dash: Dashboard):
             path = self.path.split("?", 1)[0]
             if path == "/api/state":
                 self._send(HTTPStatus.OK, dash.snapshot(self._session_id()))
+            elif path.startswith("/replay/"):
+                self._replay(path.rsplit("/", 1)[1])
             elif path.startswith("/api/"):
                 self._send(HTTPStatus.NOT_FOUND, {"error": "no such endpoint"})
             else:

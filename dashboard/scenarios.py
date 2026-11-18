@@ -21,8 +21,17 @@ is shown on the page and saved under <run dir>/scenario-<n>-<name>/.
 The checker reads the whole replicated state, so anything you did by hand in
 the same cluster is in it too; that is fine for every property (they are
 about consistency, not about who did what).
+
+Every run also writes <run dir>/scenario-<n>-<name>/events.jsonl in the
+format scripts/demo.py uses (harness/events.py): steps, every client write,
+node status, elections, your kills and restarts, then the closes, summaries,
+escrow states and the checker result. scripts/replay.py turns it into
+replay.html, which the dashboard serves at /replay/<n>.
 """
 
+import importlib.util
+import json
+import os
 import random
 import threading
 import time
@@ -33,9 +42,11 @@ from client.auction_client import ClusterClient, ClusterUnavailable
 from common import time_conv
 from harness import run as R
 from harness.background import BG_USERS, BackgroundBidder
+from harness.events import STATUS_FIELDS, EventLog
 from harness.leader_log import leader_sightings_from_file
 from harness.schedule import make_schedule
 from harness.status import StatusPoller
+from harness.procs import ROOT
 from harness.workload import PASSWORD, Board, History, Workload, record_write
 
 CLIENT_GIVE_UP = 20.0
@@ -56,6 +67,36 @@ class Stopped(Exception):
     """The user pressed Stop."""
 
 
+class RecordingHistory(History):
+    """The checker's history, which also copies every client write into the
+    run's event log, whoever made it (a scenario step, a background bidder
+    or a chaos actor)."""
+
+    def __init__(self, run):
+        super().__init__()
+        self._run = run
+
+    def append(self, record: dict):
+        super().append(record)
+        bid = record["op"] == "bid"
+        self._run.record(
+            "action", user=record["user"], op=record["op"], auction_id=record.get("auction_id"),
+            amount=record.get("amount"), outcome=record["outcome"], reason=record["reason"],
+            high_bid=record["high_bid"] if bid else None, high_bidder=record["high_bidder"] if bid else None,
+            background=self._run.is_background(record["user"]))
+
+
+def _load_replay_module():
+    spec = importlib.util.spec_from_file_location("dashboard_replay", os.path.join(ROOT, "scripts", "replay.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def mono_of_wall(epoch_us: int) -> float:
+    return time.monotonic() - (time.time() - epoch_us / 1e6)
+
+
 class ScenarioRun(threading.Thread):
     def __init__(self, dash, name, number, *, duration=None, faults=False, seed=None):
         super().__init__(name=f"scenario-{name}", daemon=True)
@@ -67,7 +108,7 @@ class ScenarioRun(threading.Thread):
         self.faults = faults
         self.seed = seed if seed is not None else random.randrange(1, 1_000_000)
         self.addrs = dash.client_addrs
-        self.history = History()
+        self.history = RecordingHistory(self)
         self.stop_evt = threading.Event()
         self.lock = threading.Lock()
         self.state = "running"          # running -> checking -> done | failed
@@ -79,13 +120,38 @@ class ScenarioRun(threading.Thread):
         self.run_dir = f"{dash.run_dir}/scenario-{number}-{name}"
         self._clients = []
         self._stats_cache = (0.0, None)
+        self.events = EventLog(os.path.join(self.run_dir, "events.jsonl"))
+        self.replay = None
+        self._status_shape, self._status_at = None, 0.0
 
     # --- helpers ------------------------------------------------------------------
 
     def say(self, text, kind="scenario"):
         with self.lock:
             self.steps.append({"t": round(time.time() - self.started, 1), "text": text})
+        self.record("step", text=text)
         self.dash.event(kind, f"[{self.title}] {text}")
+
+    def record(self, kind, **fields):
+        """One line in the run's events.jsonl (for the replay)."""
+        self.events.write(kind, **fields)
+
+    def is_background(self, user) -> bool:
+        return self.key == "chaos" or user in BG_USERS
+
+    def on_status(self, view):
+        """Called by the dashboard's status poller (10 a second). Written on
+        any change of up/role/term/leader, otherwise every 0.25 s."""
+        shape = tuple((n, None) if s is None else (n, s["role"], s["term"], s["leader_id"]) for n, s in sorted(view.items()))
+        now = time.monotonic()
+        if shape == self._status_shape and now - self._status_at < 0.25:
+            return
+        self._status_shape, self._status_at = shape, now
+        nodes = {}
+        for n, s in view.items():
+            nodes[n] = ({"up": False, **{f: None for f in STATUS_FIELDS}} if s is None
+                        else {"up": True, **{f: s[f] for f in STATUS_FIELDS}})
+        self.record("status", nodes=nodes)
 
     def wait(self, seconds):
         if self.stop_evt.wait(max(0.0, seconds)):
@@ -137,7 +203,7 @@ class ScenarioRun(threading.Thread):
             "number": self.number, "key": self.key, "title": self.title, "state": self.state,
             "elapsed": round((self.ended or time.time()) - self.started, 1), "duration": self.duration,
             "faults": self.faults, "seed": self.seed, "steps": steps, "stats": self.stats(),
-            "error": self.error, "run_dir": self.run_dir,
+            "error": self.error, "run_dir": self.run_dir, "replay": self.replay,
             "report": None if self.report is None else [
                 {"name": r.name, "passed": r.passed, "checked": r.checked, "violations": r.violations[:3]}
                 for r in self.report
@@ -161,12 +227,21 @@ class ScenarioRun(threading.Thread):
             self.state = "done"
             self.say("checker: all 10 properties PASS" if not failed else f"checker: FAIL {', '.join(failed)}",
                      kind="check")
+            self.record("checker", all_passed=not failed, properties=[
+                {"name": r.name, "passed": r.passed, "checked": r.checked} for r in self.report])
+            self.events.close()
+            try:
+                _load_replay_module().build_replay(self.run_dir)
+                self.replay = f"/replay/{self.number}"
+            except Exception as e:  # noqa: BLE001 -- the run itself is fine
+                self.say(f"replay could not be built: {type(e).__name__}: {e}")
         except Exception as e:  # noqa: BLE001 -- shown on the page, never silent
             self.error = f"{type(e).__name__}: {e}"
             self.state = "failed"
             self.say(f"failed: {self.error}")
         finally:
             self.ended = time.time()
+            self.events.close()
             for c in self._clients:
                 try:
                     c.close()
@@ -196,7 +271,33 @@ class ScenarioRun(threading.Thread):
         leaders = self.dash.leader_sightings()
         for nid, path in cluster.log_paths().items():
             leaders.extend(leader_sightings_from_file(path, f"log:{nid}"))
+        self._record_final_state(dumps)
         self.report, _ = R.check_and_save(self.run_dir, self.history.snapshot(), dumps, leaders)
+
+    def _record_final_state(self, dumps):
+        """Closes (at the time they happened), summaries and escrow states
+        from the final replicated state, for the replay."""
+        doc = next((json.loads(d["state_json"]) for d in dumps.values() if "state_json" in d), None)
+        if doc is None:
+            return
+        # Only this run's auctions: older ones in the same cluster would take
+        # the replay's first card.
+        mine = {r.get("auction_id") for r in self.history.snapshot() if r.get("auction_id") is not None}
+        for a in (a for a in doc["auctions"] if a["auction_id"] in mine):
+            self.record("auction", auction_id=a["auction_id"], item=a["item"], close_time=a["close_time"],
+                        description=a["description"])
+            if a["closed"]:
+                at = mono_of_wall(a["closed_at"]) if a["closed_at"] else None
+                self.record("close", at=at, auction_id=a["auction_id"],
+                            winner=a["winner"]["bidder"] if a["winner"] else "",
+                            winning_bid=a["winner"]["amount"] if a["winner"] else 0)
+            if a["summaries"]:
+                self.record("summary", auction_id=a["auction_id"], text=a["summaries"][0])
+            e = a["escrow"]
+            if e["status"] != "NONE":
+                self.record("escrow", auction_id=a["auction_id"], status=e["status"], amount=e["amount"],
+                            payer=e["payer"], seller=a["owner"], payment_ref=e["payment_ref"],
+                            settlement_ref=e["settlement_ref"])
 
     # --- 1. the vintage clock ---------------------------------------------------------
 
@@ -208,6 +309,7 @@ class ScenarioRun(threading.Thread):
         r = self.write("nisarg", users["nisarg"], "create", lambda: users["nisarg"].create_auction(
             aid, "vintage clock", close, {"brand": "Seiko", "era": "1970s", "condition": "running"}),
             auction_id=aid, item="vintage clock", close_time=close)
+        self.record("auction", auction_id=aid, item="vintage clock", close_time=close, description="")
         self.say(f"nisarg created #{aid} vintage clock, closes in 60 s ({r['outcome']})")
         self.say("kill, suspend or restart nodes any time now")
         sent = {u: set() for u in users}
@@ -273,6 +375,7 @@ class ScenarioRun(threading.Thread):
                            lambda aid=aid, item=item, close=close, attrs=attrs:
                            users["nisarg"].create_auction(aid, item, close, attrs),
                            auction_id=aid, item=item, close_time=close)
+            self.record("auction", auction_id=aid, item=item, close_time=close, description="")
             self.say(f"nisarg created #{aid} {item}, closes in {secs} s ({r['outcome']})")
             if aid != hero:
                 board.add(aid, close)
@@ -361,7 +464,7 @@ class ScenarioRun(threading.Thread):
     def _run_chaos(self):
         w = Workload(self.addrs, self.seed, close_after=(15.0, min(60.0, max(20.0, self.duration * 0.6))),
                      give_up_after=CLIENT_GIVE_UP, id_base=self.number * 10_000_000)
-        w.history = self.history
+        w.history = self.history  # the recording one: chaos writes reach the replay too
         self.say(f"seed {self.seed}: {len(w.actors)} clients start "
                  f"(sellers, bidders, 3 racers, payers) for {self.duration} s")
         schedule = make_schedule(self.seed, self.duration) if self.faults else []
@@ -376,8 +479,14 @@ class ScenarioRun(threading.Thread):
             for fault in schedule:
                 self.wait(fault.at - (time.monotonic() - t0))
                 done = R.inject(self.dash.cluster, poller, fault, say=lambda s: self.say(s.lower()))
+                for nid, what in done:
+                    if what == "killed":
+                        self.record("kill", node=nid, term=(self.dash.nodes.get(nid) or {}).get("term"))
                 self.wait(fault.down_for)
                 R.heal(self.dash.cluster, done, say=lambda s: self.say(s.lower()))
+                for nid, what in done:
+                    if what == "killed":
+                        self.record("restart", node=nid)
             self.wait(self.duration - (time.monotonic() - t0))
         finally:
             self.say("stopping the clients (each finishes the request it is in)")

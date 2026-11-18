@@ -1025,7 +1025,13 @@ function renderScenario(d) {
     if (sc.error) R.report.appendChild(el("div", "ev", sc.error));
     if (sc.report) {
       const passed = sc.report.filter(r => r.passed).length;
-      R.report.appendChild(el("div", "scen-report-head", `Checker: ${passed}/${sc.report.length} properties pass · saved in ${sc.run_dir}`));
+      const head = el("div", "scen-report-head", `Checker: ${passed}/${sc.report.length} properties pass · saved in ${sc.run_dir} `);
+      if (sc.replay) {
+        const link = el("a", "link", "Open replay");
+        link.href = sc.replay; link.target = "_blank"; link.rel = "noopener";
+        head.appendChild(link);
+      }
+      R.report.appendChild(head);
       for (const r of sc.report) {
         const row = el("div", "row");
         row.append(el("span", r.passed ? "pass" : "fail", r.passed ? "PASS" : "FAIL"),

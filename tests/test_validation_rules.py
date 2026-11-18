@@ -420,13 +420,13 @@ def test_the_checker_checks_an_item_refusal_against_the_item():
     assert P.REJECTIONS not in failed(check_all(history, dumps, leaders))
 
 
-def test_a_scenario_runs_end_to_end_without_a_cluster_and_reports():
+def test_a_scenario_runs_end_to_end_without_a_cluster_and_reports(tmp_path):
     """ScenarioRun's view() is what the page draws; it must work before any write."""
     from dashboard.scenarios import SCENARIOS, ScenarioRun
 
     class Dash:
         client_addrs = ["127.0.0.1:1"]
-        run_dir = "x"
+        run_dir = str(tmp_path)
 
         def event(self, *a, **k):
             pass
@@ -436,6 +436,7 @@ def test_a_scenario_runs_end_to_end_without_a_cluster_and_reports():
     assert v["state"] == "running" and v["duration"] == 60 and v["faults"] and v["seed"] == 5
     assert v["stats"]["writes"] == 0 and v["report"] is None
     assert set(SCENARIOS) == {"clock", "demo", "chaos"}
+    run.events.close()
 
 
 # --- anti-sniping (opt-in per auction) ------------------------------------------
