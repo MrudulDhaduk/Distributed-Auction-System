@@ -1,0 +1,16 @@
+# Keep the image small and free of local state: only the code goes in.
+.git
+.venv
+.pytest_cache
+**/__pycache__
+**/*.pyc
+data
+runs
+dist
+logs
+papers
+MyNotes
+Learning
+CLAUDE.md
+CLAUDE.old.md
+.claude

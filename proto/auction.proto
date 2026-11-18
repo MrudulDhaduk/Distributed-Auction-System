@@ -176,6 +176,9 @@ message CreateAuctionRequest {
   // Section 8 serial number (design note 3).
   string client_id = 6;
   uint64 seq = 7;
+  // Anti-sniping: a bid in the last 10 s extends the close to 10 s after that
+  // bid, at most 5 times (auction/state.py SNIPE_*).
+  bool anti_snipe = 8;
 }
 
 message CreateAuctionResponse {
@@ -271,6 +274,8 @@ message Auction {
   string summary = 10;
   // Stored: the seller's username, from the creating token.
   string owner = 11;
+  bool anti_snipe = 12;
+  int32 extensions = 13;          // how many times a late bid moved the close
 }
 
 // 1:1 with auction/state.py's `BidEntry`.

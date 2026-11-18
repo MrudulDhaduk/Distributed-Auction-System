@@ -342,3 +342,29 @@ input.invalid { border-color: var(--bad); box-shadow: 0 0 0 3px color-mix(in srg
 .scen-report .ev { grid-column: 2 / -1; color: var(--bad); font-size: 12px; overflow-wrap: anywhere; }
 .scen-report-head { font-size: 12px; color: var(--muted); }
 #scen-run .bar i { transition: none; }
+
+/* --- Raft mode switch --- */
+.mode-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.mode-switch button { border: 0; background: var(--card-2); padding: 4px 10px; font-size: 12px; cursor: pointer; color: var(--muted); }
+.mode-switch button + button { border-left: 1px solid var(--line); }
+.mode-switch button.active { background: var(--accent); color: #fff; }
+.pay-row { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* --- simulated partitions --- */
+.edge-hit { stroke: transparent; stroke-width: 22; cursor: pointer; }
+.edge-hit:hover + .cut-mark, .edge-hit:hover { stroke: color-mix(in srgb, var(--bad) 18%, transparent); }
+.edge.severed { stroke: var(--bad); stroke-dasharray: 3 7; stroke-width: 2.5; opacity: 1; }
+.cut-mark rect { fill: var(--card); stroke: var(--bad); }
+.cut-mark text { fill: var(--bad); font-size: 11px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; }
+.cut-mark { pointer-events: none; }
+.node-g.stale .node-core { stroke-dasharray: 5 4; }
+.node-g.stale .node-role { fill: var(--muted); }
+.badge.stale { color: var(--muted); border-color: var(--line); }
+.net-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.net-state { font-size: 12px; font-weight: 600; color: var(--ok); }
+.net-state.bad { color: var(--bad); }
+
+/* --- anti-sniping --- */
+.check-row { display: flex !important; flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--text) !important; }
+.check-row input { width: auto; }
+.snipe { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); margin-left: 4px; }

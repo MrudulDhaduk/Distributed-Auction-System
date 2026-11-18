@@ -52,6 +52,7 @@ message CreateAuction {
   int64 close_time = 3;
   string owner = 4;
   string description = 5;   // LLM text, generated BEFORE proposing
+  bool anti_snipe = 6;      // late bids extend the close (auction/state.py)
 }
 
 // 1:1 with auction/state.py's PlaceBid.

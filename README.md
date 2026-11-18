@@ -13,7 +13,9 @@ Built for CS G623 (Advanced Operating Systems). It ships with a seeded chaos
 harness and a property checker that tests the guarantees on real processes.
 Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirements-audit.md).
 
-**Want to see it working?** Run `.venv\Scripts\python.exe -m dashboard --open` and follow
+**Want to see it working?** Run `docker compose up --build` (see
+[Run it with Docker](#run-it-with-docker-groundhog)) or
+`.venv\Scripts\python.exe -m dashboard --open`, and follow
 [Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard): a
 browser dashboard that starts the cluster, shows every replica and its heartbeats live,
 and lets you kill nodes, create users and auctions, bid, and ask each auction's assistant.
@@ -79,6 +81,58 @@ flowchart LR
   [docs/auction-on-raft.md](docs/auction-on-raft.md) §2.
 - **Reads** are served only by the leader, after a read-index round
   (decisions.md A14, A15).
+
+---
+
+## Run it with Docker (GroundHog)
+
+The quickest way to run everything, on any machine with Docker Desktop: no
+Python, venv or Ollama install needed.
+
+```powershell
+docker compose up --build        # first time: builds the image, downloads the model (~2.5 GB, once)
+```
+
+Open **http://localhost:8765** and follow
+[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard).
+`docker compose down` stops everything; the model stays cached for next time.
+
+| container | what runs in it |
+|---|---|
+| `ollama` | the model server, `ollama/ollama:0.34.4` (CPU); models in the volume `groundhog-ollama-models` |
+| `model` | one-shot: pulls `qwen3:4b-instruct-2507-q4_K_M` into that volume, then exits |
+| `auction` | image `groundhog:local` (Python 3.11): the web dashboard, the LLM server and the Raft nodes n1, n2, n3 as separate processes |
+
+The nodes are processes inside one container, not one container each, on
+purpose: the dashboard starts them itself, so **Kill -9, Suspend, Resume and
+Restart work exactly as without Docker** (on Linux they are SIGKILL, SIGSTOP
+and SIGCONT). Node logs, scenario results and replays are written to `runs\`
+on your machine (a bind mount).
+
+Variations:
+
+```powershell
+$env:DASHBOARD_PORT=8770; docker compose up --build                 # 8765 is taken
+$env:DASHBOARD_LLM="fake"; docker compose up --build auction --no-deps   # canned answers, no model download
+docker compose run --rm auction python -m pytest -q                 # the test suite, on Linux
+```
+
+Measured on 2026-11-18 (Docker Desktop 29.9.2 on the dev laptop):
+
+- The full dashboard check (three leader kills, a cut link, an isolated
+  leader, Classic vs PreVote, a Vintage clock scenario with a kill and a
+  partition) passed in the container, 10/10 checker properties, never two
+  leaders in one term.
+- Failover is faster on Linux: a new leader about **0.63 s** after a kill
+  (1.2-1.6 s on Windows) and the first bid after it in 0.1-0.2 s, because
+  Linux refuses a connection to a dead port at once instead of after 2 s.
+- The real model works through the containers but is slower: about 6-7 s per
+  answer, against 1-2 s with Ollama on Windows, since Docker Desktop gives the
+  model only part of the CPU.
+- The test suite in the container: 780 passed, 11 skipped (Windows-only
+  process tests), 3 xfailed.
+- `docker stop` stops the dashboard and the nodes it started cleanly (exit 0,
+  about 1 s).
 
 ---
 
@@ -333,14 +387,23 @@ background.
 - **Account** (right). Log in (one-click buttons for the test users, password
   `pass`) or **Create account**. Each browser **tab** is its own session, so
   two tabs can be two different users side by side.
+- **Network bar** (under the triangle): click a line to cut or restore that
+  link, or use **Isolate leader**, **Isolate a follower**, **Heal network**.
+  See [Partitions](#partitions-cut-the-links-between-nodes) below.
+- **Raft mode** (switch in the Cluster header): **Classic Raft** or
+  **PreVote**. See [PreVote](#prevote-classic-raft-vs-the-improvement) below.
 - **New auction**. Item, duration (30 s to 1 h, or custom 15 s to 30 days),
-  and optional attributes. With attributes, the leader asks the LLM to write
-  the description before it proposes the auction.
+  optional attributes, and **Anti-sniping**. With attributes, the leader asks
+  the LLM to write the description before it proposes the auction.
 - **Auctions**. One card per auction: seller (marked `YOU` on your own),
   description, high bid, countdown and bar, the latest bids, the bid form,
-  and after the close the winner, the summary and the escrow state. **Ask
-  assistant** opens that auction's own assistant (see step 6); the seller
-  also gets **Edit description**. Filters: All / Open / Closed / Mine.
+  and after the close the winner, the summary and the escrow state. After the
+  close the winner gets **Pay ... into escrow**, and once it is paid the
+  seller gets **Release to me** and **Refund the winner**. An anti-sniping
+  auction shows `anti-sniping`, or `extended ×N` once late bids have moved
+  its close. **Ask assistant** opens that auction's own assistant (see step
+  6); the seller also gets **Edit description**. Filters: All / Open / Closed
+  / Mine.
 - **Users** and **Events**. Every account, and a log of kills, elections,
   new leaders, users, auctions, bids, closes, summaries and escrow changes.
 - **Scenarios** (under the cluster). Three buttons that start a predefined run
@@ -371,7 +434,12 @@ or you stop it, the dashboard:
 4. shows PASS / FAIL for each property on the card, with the first piece of
    evidence for a failure, and saves the run (history, dumps, report) in
    `runs\dashboard-<time>\scenario-<n>-<name>\`. Re-check it any time with
-   `.venv\Scripts\python.exe -m checker runs\dashboard-<time>\scenario-<n>-<name>`.
+   `.venv\Scripts\python.exe -m checker runs\dashboard-<time>\scenario-<n>-<name>`;
+5. builds a **replay** of the run and shows an **Open replay** link. The
+   replay is the same page `scripts\replay.py` makes for the scripted demo:
+   a timeline with every step, your kills and restarts, elections, bids,
+   closes, escrow changes and the checker result, playable at 0.5x to 5x. It
+   is saved as `replay.html` in the run's folder, next to `events.jsonl`.
 
 Measured on 2026-11-17: **Vintage clock** with a leader kill and restart
 mid-run, 18 writes, all 10 properties PASS. **Four auctions** with a leader
@@ -387,6 +455,100 @@ only if the close time really had passed when the reply came.
 
 The checker reads the whole replicated state, so anything you did by hand in
 the same cluster is checked as well.
+
+### PreVote: classic Raft vs the improvement
+
+The switch in the Cluster header changes how every node starts an election.
+It takes effect at once and is re-applied to a node that is restarted.
+
+- **Classic Raft** (the paper's Figure 2, the default). When a follower's
+  election timer runs out, it raises its term and asks for votes. A node that
+  was frozen or cut off has its timer run out while it cannot hear the
+  leader, so when it comes back it raises the term, and the leader steps down
+  on seeing the higher term. Nothing is lost, but there is an election for no
+  reason.
+- **PreVote** (Ongaro's thesis, section 9.6). When the timer runs out, the
+  node first asks "would you vote for me in term T+1?" without changing its
+  own term. The others say yes only if that term is ahead of theirs, its log
+  is at least as up to date as theirs, and they have not heard from a leader
+  within the minimum election timeout. Only a majority of yes starts the real
+  election. A node coming back from a freeze gets no, and simply goes back
+  to following the leader. If the leader really is dead, nobody hears from
+  it, so the pre-vote succeeds and a new leader is elected as before.
+
+Measured on the dashboard (2026-11-18), suspending a follower for 3 s and
+resuming it, twice in each mode: Classic, the resumed node became leader
+both times and the term went up by one (n3→n1, term 1→2; n1→n2, term 2→3).
+PreVote, the same leader and the same term both times (n1 in term 2; n2 in
+term 3). Tests: `tests/test_raft_prevote.py`.
+
+How it is built: `RequestVote` has a `preVote` flag (`proto/raft.proto`); a
+node answering a pre-vote changes no state (`raft/node.py`
+`_answer_prevote`); `StatusService.SetPreVote` switches a node at run time;
+`python -m server.serve --prevote` starts a node with it on.
+
+### Anti-sniping
+
+Tick **Anti-sniping** when creating an auction. A bid that arrives in the
+last 10 s moves the close to 10 s after that bid, at most 5 times per
+auction. It is decided inside `apply()` from the bid's own timestamp (stamped
+by the leader), so every replica extends the same auction to the same time;
+the closer reads the current close time, so it waits for the new one. The
+bid's answer says so (`Bid of 150 added; late bid, closing time extended
+(1/5)`). Measured: a bid 3 s before the close moved it by 7 s. Tests:
+`tests/test_validation_rules.py`.
+
+### Payments from the page
+
+After an auction closes, the winner sees **Pay <amount> into escrow** on its
+card, and after that the seller sees **Release to me** and **Refund the
+winner**. The page only shows each button to the person allowed to press it,
+and `apply()` refuses anyone else whatever client they use. Checked on
+2026-11-18: a non-winner paying, a second payment, the seller releasing
+before payment, and a non-seller releasing were each refused, and pay, then
+release, ended in RELEASED; pay, then refund, ended in REFUNDED.
+
+### Partitions: cut the links between nodes
+
+Under the triangle there is a network bar. **Click any line between two
+nodes** to cut that link; click it again to restore it. A cut link turns red
+and shows `cut`. With three links you can make any shape: one node alone,
+the leader alone, or a single cut link with everyone still connected through
+the third node. The bar also has **Isolate leader**, **Isolate a follower**
+and **Heal network**. A scenario heals the network before its checker runs.
+
+What a cut does: each node keeps a list of peers it is cut off from, and Raft
+messages to or from them are dropped in both directions, as if the cable were
+unplugged (`raft/node.py` `set_blocked_peers`, switched over
+`StatusService.SetBlockedPeers`). The client ports are not cut, so clients
+can still reach every node, which is what makes the cut-off leader visible.
+
+Try **Isolate leader**, then bid:
+
+1. The two connected nodes stop hearing the leader, elect a new one in a
+   higher term, and carry on.
+2. The cut-off node still says it is the leader: the page shows it as
+   **old leader** (dashed) with `LEADER (old term)` on its card, and its
+   commit index stops moving. Two leaders at once, in different terms; only
+   the one with a majority can commit.
+3. A bid sent to the old leader is accepted into its log but cannot commit.
+   The client gets "outcome unknown" after the commit timeout and retries on
+   another node with the same serial number, where it commits.
+4. **Heal network**: the old leader sees the higher term, steps down, and its
+   uncommitted entry is replaced by the new leader's log. The bid is in the
+   state exactly once.
+
+Measured on 2026-11-18: n3 (leader, term 1) isolated; n2 became leader in
+term 3 while n3 still reported LEADER in term 1 with its commit index stuck;
+a bid sent during the partition answered after 5.2 s (first the old leader,
+then the retry on n2); after healing n3 was a follower in term 3, all three
+at the same commit index, and the bid was in the state once. Cutting only
+n1-n2 kept writes working (both still reach n3), at the cost of a few
+elections in Classic mode. With **PreVote** on, an isolated follower does not
+raise its term while cut off (`tests/test_raft_partition.py`).
+
+It is a simulated partition: one machine, processes dropping each other's
+messages in software, and clients are never cut off.
 
 ### A ten-minute walkthrough (by hand)
 
@@ -436,11 +598,14 @@ workload**) first and do steps 7-10 while it runs.
    quorum**, and a bid now fails after about 15 s with *"No leader answered
    in time"*: one node out of three cannot commit anything. Restart one node,
    a leader is elected, and bids work again. Then restart the third.
-10. **Freeze a follower.** **Suspend** a follower. It turns light blue, and on
-    the leader's card its *last reply* age climbs and turns red, while bids
-    still commit on the other two nodes. **Resume** it and it catches up.
-    Suspending the leader instead shows a deposed leader coming back with an
-    old term.
+10. **Freeze a follower, in both Raft modes.** With **Classic Raft** selected,
+    **Suspend** a follower for a few seconds, then **Resume** it: it comes
+    back, starts an election with a higher term and usually becomes the new
+    leader, though nothing was wrong with the old one. Switch to **PreVote**
+    and do the same: the resumed node asks first, nobody agrees (they all
+    hear the leader), and the leader and the term stay as they were. While a
+    node is frozen its card turns light blue and the leader's *last reply* age
+    for it climbs and turns red, but bids still commit on the other two.
 11. **Watch the close.** When the countdown reaches 0 the card says
     `CLOSING…` until the leader's closer commits `CloseAuction`. Then it shows
     **Won by karan at ...** and, a few seconds later, the **summary**.
@@ -488,7 +653,7 @@ refused bidder must really be the seller). Tests:
   (for example `test_workload.py`, `test_failover_grpc.py`,
   `test_serve_grpc.py`, `test_harness.py`). Don't run the suite during a chaos
   run (testing-and-chaos.md Known gaps 13).
-- Last full run (2026-11-17, after the dashboard scenarios): 756 passed, 3 xfailed in 132 s. The 3 xfails are strict xfails: the
+- Last full run (2026-11-18, after replays): 791 passed, 3 xfailed. The 3 xfails are strict xfails: the
   persistence tests run against MemoryStorage, to prove those tests can fail
   (decisions.md P13).
 - `pytest.ini` sets `--capture=sys`. With pytest's default capture a gRPC log
@@ -599,9 +764,11 @@ paper section in brackets).
 Copied from the Known-gaps sections of the walkthroughs. The full lists are
 there.
 
-- **Crash faults only.** Every injected fault is a process kill or suspend on
-  one machine. There are no network partitions between real processes, no
-  clock skew, no disk faults, and no Byzantine behaviour. Clients and servers
+- **Crash faults and simulated partitions only.** The chaos harness injects
+  process kills and suspends on one machine; the dashboard can also cut Raft
+  links between nodes (messages dropped in software, clients never cut off).
+  There are no real network failures, no clock skew, no disk faults, and no
+  Byzantine behaviour. Clients and servers
   share one clock, which one checker rule relies on
   ([testing-and-chaos.md](docs/testing-and-chaos.md) gaps 4 and 2). On
   Windows, power loss right after a rename could roll back a vote
@@ -622,16 +789,20 @@ there.
 - **Client failover is floored at ~2 s on Windows** by the 2.0 s connect
   refusal to the dead leader's port (decisions.md T18,
   [testing-and-chaos.md](docs/testing-and-chaos.md) gap 12).
-- **A resumed follower deposes a healthy leader.** There is no PreVote and no
-  §6 rule (decisions.md T15). This costs liveness, never safety.
+- **In Classic Raft mode a resumed follower deposes a healthy leader**
+  (decisions.md T15). This costs liveness, never safety. The **PreVote**
+  mode fixes it; it is off by default so the code still matches the paper's
+  Figure 2 unless you switch it on. The §6 rule is not implemented.
 - **The chaos run's LLM was a canned-answer server.** The FAQ and price-trend
   reads are covered by unit and gRPC tests and the demo, not by chaos. (The
   chaos workload does read now: payers read `GetAuction`, sellers `GetEscrow`.)
 - **The peer port is plain TCP with no auth.** Session tokens are stored in
   plain text in `log.bin` ([auction-on-raft.md](docs/auction-on-raft.md) §15).
-- **Not built from the problem statement:** an `ExtendAuction` command (the
-  anti-snipe stretch goal). The terminal dashboard shows a state digest rather
-  than each node's high bid.
+- **Anti-sniping is a rule inside `PlaceBid`, not a separate `ExtendAuction`
+  command,** and it is opt-in per auction (the chaos workload and the
+  scenarios do not use it: their bidders bid until the close, so it would
+  keep extending up to the cap). The terminal dashboard shows a state digest
+  rather than each node's high bid.
 - **Logs from before the validation rules replay differently.** The seller
   rule and the create checks are in `apply()`, so a `data\` directory written
   earlier, in which a seller bid on their own auction, now replays that bid as

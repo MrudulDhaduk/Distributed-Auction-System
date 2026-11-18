@@ -126,6 +126,9 @@ class Dashboard:
         self._leaders = set()                                 # (term, node) LEADER sightings, for the checker
         self.scenario = None                                  # the current or last ScenarioRun
         self._scenario_no = 0
+        self._scenario_dirs = {}                              # number -> run dir (for replays)
+        self.prevote = False                                  # desired Raft mode on every node
+        self.cut_links = set()                                # {frozenset({a, b})}: simulated partition
 
     # --- lifecycle -----------------------------------------------------------------
 
@@ -180,7 +183,99 @@ class Dashboard:
             "election_timeout_min_ms": m.election_timeout_min_ms,
             "election_timeout_max_ms": m.election_timeout_max_ms,
             "pid": m.pid,
+            "prevote": m.prevote,
+            "blocked_peers": sorted(m.blocked_peers),
         }
+
+    def _set_prevote_on(self, nid, on):
+        try:
+            self._stubs[nid].SetPreVote(status_pb2.SetPreVoteRequest(on=on), timeout=STATUS_TIMEOUT)
+        except grpc.RpcError:
+            pass  # down or frozen: tried again on the next poll
+
+    # --- simulated partitions ----------------------------------------------------
+
+    def _blocked_for(self, nid) -> list:
+        with self._lock:
+            return sorted(next(iter(link - {nid})) for link in self.cut_links if nid in link)
+
+    def _set_blocked_on(self, nid, peers):
+        try:
+            self._stubs[nid].SetBlockedPeers(status_pb2.SetBlockedPeersRequest(peers=peers), timeout=STATUS_TIMEOUT)
+        except grpc.RpcError:
+            pass  # down or frozen: tried again on the next poll
+
+    def _apply_links(self):
+        for nid in self._stubs:
+            self._pool.submit(self._set_blocked_on, nid, self._blocked_for(nid))
+
+    def set_link(self, payload):
+        payload = validate.body(payload)
+        a, b, cut = payload.get("a"), payload.get("b"), payload.get("cut")
+        if a not in self._stubs or b not in self._stubs or a == b:
+            raise Invalid("Pick two different nodes")
+        if not isinstance(cut, bool):
+            raise Invalid("Send cut: true or false")
+        link = frozenset((a, b))
+        with self._lock:
+            (self.cut_links.add if cut else self.cut_links.discard)(link)
+        self._apply_links()
+        self.event("partition", f"{'cut' if cut else 'restored'} link {min(a, b)}-{max(a, b)}")
+        self._scenario_note(f"you: {'cut' if cut else 'restored'} link {min(a, b)}-{max(a, b)}")
+        return {"ok": True, "message": f"link {min(a, b)}-{max(a, b)} {'cut' if cut else 'restored'}"}
+
+    def network_preset(self, payload):
+        name = validate.body(payload).get("name")
+        ids = sorted(self._stubs)
+        with self._lock:
+            leader = self.leader
+            up = [n for n, s in self.nodes.items() if s is not None]
+        if name == "heal":
+            return self.heal_network()
+        if name == "isolate_leader":
+            if leader is None:
+                raise Invalid("There is no leader to isolate right now")
+            target = leader
+        elif name == "isolate_follower":
+            followers = [n for n in up if n != leader]
+            if not followers:
+                raise Invalid("No follower is answering")
+            target = followers[0]
+        else:
+            raise Invalid("Unknown preset")
+        with self._lock:
+            self.cut_links = {frozenset((target, o)) for o in ids if o != target}
+        self._apply_links()
+        what = "leader" if target == leader else "follower"
+        self.event("partition", f"isolated {target} ({what}) from the other two")
+        self._scenario_note(f"you: isolated {target} ({what})")
+        return {"ok": True, "message": f"{target} is cut off from the other two"}
+
+    def heal_network(self):
+        with self._lock:
+            had = bool(self.cut_links)
+            self.cut_links = set()
+        self._apply_links()
+        if had:
+            self.event("partition", "network healed: every link restored")
+            self._scenario_note("network healed")
+        return {"ok": True, "message": "every link restored"}
+
+    def _scenario_note(self, text):
+        run = self.scenario
+        if run is not None and run.is_alive():
+            run.say(text)
+
+    def set_prevote(self, payload):
+        payload = validate.body(payload)
+        on = payload.get("on")
+        if not isinstance(on, bool):
+            raise Invalid("Send {\"on\": true} or {\"on\": false}")
+        self.prevote = on
+        for nid in self._stubs:
+            self._pool.submit(self._set_prevote_on, nid, on)
+        self.event("system", "Raft mode: " + ("PreVote (a returning node asks first)" if on else "classic Raft"))
+        return {"ok": True, "message": "PreVote on" if on else "PreVote off (classic Raft)"}
 
     def _status_loop(self):
         while not self._stop.wait(STATUS_INTERVAL):
@@ -196,6 +291,16 @@ class Dashboard:
                 self.nodes, self.leader = view, leader
                 for s in leaders:
                     self._leaders.add((s["term"], s["node_id"]))
+            # A restarted node comes back with PreVote off and every link up:
+            # put it back in the chosen mode and partition.
+            for nid, s in view.items():
+                if s is not None and s["prevote"] != self.prevote:
+                    self._pool.submit(self._set_prevote_on, nid, self.prevote)
+                if s is not None and s["blocked_peers"] != self._blocked_for(nid):
+                    self._pool.submit(self._set_blocked_on, nid, self._blocked_for(nid))
+            run = self.scenario
+            if run is not None and run.is_alive():
+                run.on_status(view)
 
     def _status_events(self, view, leader):
         for nid, s in view.items():
@@ -213,6 +318,9 @@ class Dashboard:
                     self.event("election", f"{nid} candidate, term {s['term']}", node=nid)
                 elif s["role"] == "LEADER":
                     self.event("leader", f"{nid} leader, term {s['term']}", node=nid)
+                    run = self.scenario
+                    if run is not None and run.is_alive():
+                        run.record("election", leader=nid, term=s["term"])
                 elif prev["role"] == "LEADER":
                     self.event("election", f"{nid} stepped down, term {s['term']}", node=nid)
         self._prev_nodes = view
@@ -252,6 +360,7 @@ class Dashboard:
             "high_bid": top["amount"] if top else 0, "high_bidder": top["bidder"] if top else "",
             "bids": bids, "escrow": a["escrow"],
             "summary": a["summaries"][0] if a["summaries"] else "",
+            "anti_snipe": a.get("anti_snipe", False), "extensions": a.get("extensions", 0),
         }
 
     def _state_events(self, auctions, users):
@@ -334,7 +443,8 @@ class Dashboard:
                 "auctions": list(self.auctions), "users": list(self.users),
                 "state_from": self.state_from, "state_at": self.state_at,
                 "events": list(self.events)[-120:], "llm": self.llm_status,
-                "llm_mode": self.llm_mode, "me": me.username if me else None,
+                "llm_mode": self.llm_mode, "me": me.username if me else None, "prevote": self.prevote,
+                "cut_links": sorted(sorted(link) for link in self.cut_links),
                 "run_dir": self.run_dir,
                 "scenario": None if self.scenario is None else self.scenario.view(),
                 "scenarios": {"catalog": SCENARIOS, "chaos_durations": CHAOS_DURATIONS},
@@ -377,6 +487,15 @@ class Dashboard:
                 raise Invalid(f"{nid} is {state}, not suspended")
             node.resume()
             self.event("resume", f"resumed {nid}", node=nid)
+        run = self.scenario
+        if run is not None and run.is_alive():
+            with self._lock:
+                term = (self.nodes.get(nid) or {}).get("term")
+            if action == "kill":
+                run.record("kill", node=nid, term=term)
+            elif action == "restart":
+                run.record("restart", node=nid)
+            run.say(f"you: {action} {nid}" + (" (leader)" if was_leader else ""))
         return {"ok": True, "message": f"{action}: {nid}", "process": node.state}
 
     # --- scenarios -------------------------------------------------------------------
@@ -405,9 +524,40 @@ class Dashboard:
             faults = payload.get("faults") is True
         self._scenario_no += 1
         run = ScenarioRun(self, name, self._scenario_no, duration=duration, faults=faults)
+        self._scenario_dirs[run.number] = run.run_dir
         self.scenario = run
         run.start()
         return {"ok": True, "message": f"started {run.title}"}
+
+    def escrow_action(self, session_id, action, payload):
+        """pay (the winner, the winning amount), release / refund (the seller).
+        The dashboard checks first for a clear message; apply() decides
+        (auction/state.py payment_rejection / settlement_rejection)."""
+        s = self._session(session_id)
+        payload = validate.body(payload)
+        auction_id = payload.get("auction_id")
+        if isinstance(auction_id, bool) or not isinstance(auction_id, int) or auction_id < 1:
+            raise Invalid("Auction must be a positive whole number")
+        a = self._auction(auction_id)
+        if a is not None:
+            if not a["closed"]:
+                raise Invalid("The auction has not closed yet")
+            if action == "pay" and a["winner"] != s.username:
+                raise Invalid("Only the winner can pay")
+            if action != "pay" and a["owner"] != s.username:
+                raise Invalid("Only the seller can release or refund the escrow")
+        with s.lock:
+            if action == "pay":
+                amount = a["high_bid"] if a is not None else 0
+                r = s.client.pay(auction_id, amount)
+            elif action == "release":
+                r = s.client.release_escrow(auction_id)
+            else:
+                r = s.client.refund_escrow(auction_id)
+        if not r.result.success:
+            raise Invalid(r.result.reason)
+        self.event("escrow", f"{s.username}: {action} on #{auction_id}")
+        return {"ok": True, "message": r.result.reason}
 
     def stop_scenario(self):
         run = self.scenario
@@ -475,7 +625,8 @@ class Dashboard:
                 auction_id = self._next_auction_id
             with s.lock:
                 r = s.client.create_auction(auction_id, req["item"], time_conv.dt_to_micros(close),
-                                            attributes=req["attributes"] or None)
+                                            attributes=req["attributes"] or None,
+                                            anti_snipe=req["anti_snipe"])
             if r.result.success:
                 return {"ok": True, "auction_id": auction_id, "message": r.result.reason}
             if not r.result.reason.startswith("ID already exists"):
@@ -570,6 +721,20 @@ def make_handler(dash: Dashboard):
             self.end_headers()
             self.wfile.write(data)
 
+        def _replay(self, number):
+            run_dir = dash._scenario_dirs.get(int(number)) if number.isdigit() else None
+            full = os.path.join(run_dir, "replay.html") if run_dir else None
+            if not full or not os.path.isfile(full):
+                self._send(HTTPStatus.NOT_FOUND, {"error": "no replay for that run (yet)"})
+                return
+            with open(full, "rb") as f:
+                data = f.read()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _session_id(self):
             return self.headers.get("X-Session") or None
 
@@ -577,6 +742,8 @@ def make_handler(dash: Dashboard):
             path = self.path.split("?", 1)[0]
             if path == "/api/state":
                 self._send(HTTPStatus.OK, dash.snapshot(self._session_id()))
+            elif path.startswith("/replay/"):
+                self._replay(path.rsplit("/", 1)[1])
             elif path.startswith("/api/"):
                 self._send(HTTPStatus.NOT_FOUND, {"error": "no such endpoint"})
             else:
@@ -611,6 +778,14 @@ def make_handler(dash: Dashboard):
                     result = dash.ask(sid, payload)
                 elif len(parts) == 4 and parts[:2] == ["api", "scenarios"] and parts[3] == "start":
                     result = dash.start_scenario(parts[2], payload)
+                elif path == "/api/raft/prevote":
+                    result = dash.set_prevote(payload)
+                elif path == "/api/network/link":
+                    result = dash.set_link(payload)
+                elif path == "/api/network/preset":
+                    result = dash.network_preset(payload)
+                elif path in ("/api/pay", "/api/release", "/api/refund"):
+                    result = dash.escrow_action(sid, path.rsplit("/", 1)[1], payload)
                 elif path == "/api/scenarios/stop":
                     result = dash.stop_scenario()
                 elif path == "/api/describe":

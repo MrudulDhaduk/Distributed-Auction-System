@@ -43,6 +43,9 @@ message RequestVoteRequest {
   int64 term = 3;           // candidate's term
   int64 lastLogIndex = 4;   // index of candidate's last log entry (0: empty log)
   int64 lastLogTerm = 5;    // term of candidate's last log entry (0: empty log)
+  // PreVote (thesis 9.6): a question, not an election. The receiver answers
+  // "would I vote for you in `term`?" and changes no state.
+  bool preVote = 6;
 }
 
 message RequestVoteResponse {

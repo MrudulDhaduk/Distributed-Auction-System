@@ -323,6 +323,9 @@ def test_term_and_vote_are_fsynced_before_the_rename(open_storage, monkeypatch):
 
 def test_empty_append_writes_nothing(open_storage, fsyncs):
     s = open_storage()
+    # Opening may fsync too: on POSIX the new files' directory is fsync'd
+    # (_fsync_dir; a no-op on Windows). Only the append itself is under test.
+    fsyncs.clear()
     s.append([])
     assert fsyncs == []
 

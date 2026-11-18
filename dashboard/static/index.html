@@ -30,10 +30,21 @@
       <div class="card-head">
         <h2>Cluster</h2>
         <span class="hint">Dots: heartbeats from the leader. Ring: election timer.</span>
+        <div class="mode-switch" role="group" aria-label="Raft mode">
+          <button type="button" data-prevote="false" title="The Raft paper's Figure 2: a node whose timer runs out starts an election at once">Classic Raft</button>
+          <button type="button" data-prevote="true" title="A node whose timer runs out first asks the others; nobody with a live leader says yes">PreVote</button>
+        </div>
       </div>
       <div class="cluster-wrap">
         <svg id="topology" viewBox="0 0 640 390" role="img" aria-label="Cluster topology"></svg>
         <div class="quorum" id="quorum"></div>
+        <div class="net-bar">
+          <span class="net-state" id="net-state">all links up</span>
+          <span class="hint">Click a line to cut or restore that link.</span>
+          <button class="btn small" data-net="isolate_leader">Isolate leader</button>
+          <button class="btn small" data-net="isolate_follower">Isolate a follower</button>
+          <button class="btn small" data-net="heal">Heal network</button>
+        </div>
       </div>
       <div class="nodes" id="nodes"></div>
     </div>
@@ -103,6 +114,7 @@
           <button type="button" class="link" id="attr-add">+ add attribute</button>
           <span class="field-err" data-for="attributes"></span>
         </div>
+        <label class="check-row"><input type="checkbox" name="anti_snipe" id="anti-snipe"> Anti-sniping <span class="hint">a bid in the last 10 s moves the close to 10 s later (up to 5 times)</span></label>
         <button class="btn primary" type="submit" id="create-btn">Create auction</button>
         <div class="form-note" id="create-note"></div>
       </form>

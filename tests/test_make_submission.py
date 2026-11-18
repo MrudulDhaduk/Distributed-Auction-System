@@ -34,10 +34,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 # Directories whose every file must be in the zip (minus caches).
-PACKAGES = ("auction", "checker", "client", "common", "generated", "harness",
-            "llm_server", "raft", "replication", "server", "sessions")
+# Every top-level Python package in the repo, found on disk rather than listed
+# here: a hand-written list once matched the script's and both missed the
+# dashboard package, so the zip shipped without it.
+PACKAGES = tuple(sorted(
+    d for d in os.listdir(ROOT)
+    if os.path.isfile(os.path.join(ROOT, d, "__init__.py")) and d != "tests"
+))
 TREES = PACKAGES + ("proto", "scripts", "docs", "tests")
-TOP_FILES = ("README.md", "requirements.txt", "pytest.ini", "LICENSE")
+TOP_FILES = ("README.md", "requirements.txt", "pytest.ini", "LICENSE",
+             "Dockerfile", "docker-compose.yml", ".dockerignore")
 
 # Path segments that must never appear, and file names that must never appear.
 FORBIDDEN_SEGMENTS = {".venv", "data", "__pycache__", ".git", "papers", "runs",
@@ -121,7 +127,10 @@ def test_key_files_are_there_by_name(built):
                 "proto/raft.proto", "proto/commands.proto", "generated/raft_pb2.py",
                 "docs/decisions.md", "docs/stress-results.md", "docs/payment-and-llm.md",
                 "docs/demo-runsheet.md", "docs/requirements-audit.md", "Documents/Problem_Statement.md",
-                "scripts/make_submission.ps1", "scripts/chaos.py", "tests/conftest.py"):
+                "scripts/make_submission.ps1", "scripts/chaos.py", "tests/conftest.py",
+                "dashboard/__main__.py", "dashboard/server.py", "dashboard/scenarios.py",
+                "dashboard/static/index.html", "dashboard/static/app.js", "dashboard/static/style.css",
+                "sessions/users.py"):
         assert f"{TOP}/{rel}" in names, rel
 
 

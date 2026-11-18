@@ -245,12 +245,13 @@ class ClusterClient:
     # `token` on each method below: send this token instead of login()'s. Only
     # post() and get() use it (their signature carries the token).
 
-    def create_auction(self, auction_id, item, close_time, attributes=None, token=None):
+    def create_auction(self, auction_id, item, close_time, attributes=None, token=None, anti_snipe=False):
         """close_time: epoch micros UTC. attributes (e.g. {"condition":
         "mint"}) drive the server-side LLM description; omit to skip it."""
         return self._call("AuctionService", "CreateAuction", auction_pb2.CreateAuctionRequest(
             auction_id=auction_id, item=item, close_time=close_time, attributes=attributes or {},
-            client_id=self.client_id, seq=self._next_seq()), timeout=CREATE_TIMEOUT, token=token)
+            anti_snipe=anti_snipe, client_id=self.client_id, seq=self._next_seq()),
+            timeout=CREATE_TIMEOUT, token=token)
 
     def place_bid(self, auction_id, amount, token=None) -> auction_pb2.PlaceBidResponse:
         return self._call("AuctionService", "PlaceBid", auction_pb2.PlaceBidRequest(

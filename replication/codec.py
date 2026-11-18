@@ -48,7 +48,7 @@ def encode(command, client_id: str = "", seq: int = 0) -> bytes:
         msg.create_auction.CopyFrom(commands_pb2.CreateAuction(
             auction_id=c.auction_id, item=c.item,
             close_time=time_conv.dt_to_micros(c.close_time),
-            owner=c.owner, description=c.description,
+            owner=c.owner, description=c.description, anti_snipe=c.anti_snipe,
         ))
     elif isinstance(c, auction.PlaceBid):
         msg.place_bid.CopyFrom(commands_pb2.PlaceBid(
@@ -105,7 +105,7 @@ def decode(data: bytes) -> Envelope:
         command = auction.CreateAuction(
             auction_id=m.auction_id, item=m.item,
             close_time=time_conv.micros_to_dt(m.close_time),
-            owner=m.owner, description=m.description,
+            owner=m.owner, description=m.description, anti_snipe=m.anti_snipe,
         )
     elif kind == "place_bid":
         m = msg.place_bid
