@@ -13,11 +13,17 @@ Built for CS G623 (Advanced Operating Systems). It ships with a seeded chaos
 harness and a property checker that tests the guarantees on real processes.
 Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirements-audit.md).
 
-**Dashboard.** `.venv\Scripts\python.exe -m dashboard --open` starts the cluster and a
-browser page that shows every replica live, with controls to kill nodes and run
-scenarios; see [Web dashboard](#web-dashboard).
+**Want to see it working?** Run `.venv\Scripts\python.exe -m dashboard --open` and follow
+[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard): a
+browser dashboard that starts the cluster, shows every replica and its heartbeats live,
+and lets you kill nodes, create users and auctions, bid, and ask each auction's assistant.
 
-**Author:** Mrudul Dhaduk. Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`).
+**Who wrote what.** The M1 code (`auction/state.py`'s `apply()` and commands,
+gRPC, auth and sessions, the closer, the LLM server) was written by the author.
+Two M1 commits are by Nisarg Vagh (`8374041`, `172b0bc`). The M2 code (Raft,
+persistence, replication, the harness and checker, and this chunk's payment and
+LLM wiring) was built with Claude Code, one chunk at a time, under the author's
+review: each chunk was studied, discussed and committed by the author.
 
 ---
 
@@ -102,7 +108,7 @@ ollama pull qwen3:4b-instruct-2507-q4_K_M
 .venv\Scripts\python.exe scripts\llm_rpc_smoke.py            # one call per job, to check it works on its own
 ```
 
-`run_cluster.ps1` starts the LLM server for you. The first call
+`run_cluster.ps1` and `demo.ps1` start the LLM server for you. The first call
 after Ollama loads the model took 15.75 s on the dev machine; later calls took
 1 to 7 s. Every call the nodes make carries a 25 s deadline.
 
@@ -110,7 +116,8 @@ Without Ollama the system still runs. A description at creation degrades to
 `""`, and the assistant calls return a clear "the assistant is unavailable ...;
 the auction is unaffected" answer (decisions.md C12, C13;
 [docs/design-notes.md](docs/design-notes.md) explains the model choice).
-**The recorded chaos run used a canned-answer LLM server** (`--fake-llm`), not the
+**The recorded demo run used the real model** (see "The scripted demo"). **The
+recorded chaos run used a canned-answer LLM server** (`--fake-llm`), not the
 model: a 4B model on the CPU would share cores with Raft's election timers
 (decisions.md C22).
 
@@ -124,6 +131,21 @@ The generated gRPC stubs are committed in `generated\`. After changing a
 ---
 
 ## Running it
+
+### One node
+
+A cluster of one elects itself and commits on its own vote:
+
+```powershell
+.venv\Scripts\python.exe -m server.serve --node-id n1 --client-port 50071 --peer-port 50061 --data-dir data\solo
+# in a second window:
+.venv\Scripts\python.exe -m client.auction_client --nodes 127.0.0.1:50071
+```
+
+Checked by hand on 2026-11-10, without the LLM: the node logged
+`term 1 CANDIDATE -> LEADER: won election with 1 votes`, then
+`appended no-op at index 1`, and the client flow finished with
+`winner: "mrudul"`. `--data-dir` is required (decisions.md A13).
 
 ### A 3-node cluster
 
@@ -140,10 +162,37 @@ from disk, and the leader sends it what it missed.
 If `data\` was written before commit `cd8128a` (the time-conversion fix,
 decisions.md T1), wipe it first: `Remove-Item -Recurse data`.
 
+### The client
+
+```powershell
+.venv\Scripts\python.exe -m client.auction_client
+```
+
+It runs the scripted flow: four logins, one auction ("vintage clock", closes in
+25 s), bids of 150 and 200 and an equal 200 that is refused, then it waits for
+the close and prints the final auction. It follows leader redirects and
+retries with the same `(client_id, seq)` (decisions.md A17, A18). Close the
+leader's window mid-run to watch it fail over.
+
 Seeded accounts: `mrudul`, `nisarg`, `karan`, `tanmay`, password `pass`
 (`sessions/users.py`). More accounts can be created at run time with
 `AuthService.Register` (the web dashboard's "Create account" tab, or
 `ClusterClient.register(username, password)`); see [Validation rules](#validation-rules).
+
+### The terminal dashboard
+
+For the browser dashboard see
+[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard).
+The terminal one only watches a cluster that something else started:
+
+```powershell
+.venv\Scripts\python.exe scripts\dashboard.py                    # a run_cluster.ps1 cluster
+.venv\Scripts\python.exe scripts\dashboard.py --base-peer 50081  # a chaos or stress cluster
+```
+
+It shows, per node, the role, term, leader, commitIndex, lastApplied, last log
+entry and state digest, plus one verdict: `agree`, `catching up` or
+`DIVERGED` ([docs/testing-and-chaos.md](docs/testing-and-chaos.md) §2).
 
 ### Using it from Python
 
@@ -167,9 +216,65 @@ c.get(c.token, "price_trends", {})
 `description`. `get` types: `auction`, `auctions`, `escrow`, `assistant`,
 `price_trends`. The seller releases or refunds; only the winner pays.
 
+### The scripted demo
+
+```powershell
+.\scripts\demo.ps1 -Pause 4
+```
+
+It opens the dashboard and runs `scripts\demo.py`: start the LLM server and 3
+nodes, warm the model, log in, create four auctions (the LLM writes each
+description), start six background bidders (`bg1`-`bg6`, one client each) that
+bid on auctions 2-4 until they close, race two equal bids on auction 1 (the
+hero), ask the assistant about the live auction, kill -9 the leader **while the
+background bidders are bidding**, keep bidding, restart the dead node, wait for
+the closes (the hero closes last), show the LLM-written result summaries, have
+the winners pay into escrow (the background winners with their own clients),
+kill -9 the leader **again** and read the same escrow from the new leader,
+release and refund the escrow, show price trends and the stall each leader kill
+caused for the background bidders, then run the checker.
+
+Run end to end on 2026-11-10 with the real model (`demo.ps1 -Pause 0.5`, exit
+0, all ten properties PASS, 90.2 s with 0.5 s pauses). Timings printed by that
+run: model warm-up 6.13 s, create auction including the LLM description 1.83 s,
+assistant answer 1.14 s, close to summary visible 5.56 s, price trends 2.28 s.
+At `-Pause 4` the same run is longer by about 3.5 s per step. Minute-by-minute
+script: [docs/demo-runsheet.md](docs/demo-runsheet.md).
+
+Run on 2026-11-10 at `-Pause 4` (the presenting speed), the four-auction demo:
+all ten properties PASS, whole run 147.19 s. The background bidders made 599
+bids (531 accepted, 68 refused, 0 errors); the first leader kill stalled a
+background bid for 2.18 s. Its output and its replay are in
+`runs\demo-20261110-150720` (local only).
+
+Do not run the demo and `run_cluster.ps1` at the same time: they use the same
+ports.
+
+### Replay a demo run
+
+Every demo run writes `runs\demo-<time>\events.jsonl`: one line per step,
+client write, kill, restart, election, close, summary, escrow change and
+checker result, each stamped with its time. The replay turns that file into one
+self-contained HTML page (data, CSS and JavaScript inside it; no server, no
+internet):
+
+```powershell
+.venv\Scripts\python.exe scripts\replay.py runs\demo-<time>
+```
+
+Open `runs\demo-<time>\replay.html` in a browser. Space plays and pauses, the
+left and right arrows jump to the previous or next step, kill, election or
+escrow change, the speed buttons set 0.5x to 5x, and the timeline jumps to any
+marker. Dragging the slider rebuilds the state at that time from the events.
+The page opens with a banner saying it is a replay, so it cannot be mistaken
+for a live system. The end of the run shows the checker's result.
+
+The replay is built by `scripts\replay.py`, and the state is computed there and
+tested in `tests\test_replay.py`. The page only displays it.
+
 ---
 
-## Web dashboard
+## Walk through the demo yourself (web dashboard)
 
 One command starts the LLM server, three Raft nodes and a web page that shows
 them live and lets you act on them. Everything on the page comes from the
@@ -204,6 +309,44 @@ dashboard, or use `--llm fake`. The first model load takes about 15 s, and the
 dashboard does it in the
 background.
 
+### What is on the page
+
+- **Cluster** (top left). Three nodes in a triangle; the leader is drawn in
+  gold. **Gold dots** run from the leader to each follower: each one is an
+  `AppendEntries` the follower accepted (its `heartbeats_received` counter
+  went up between two polls). **Green dots** run back when the leader's reply
+  counter for that follower goes up. The **ring** around a follower is its
+  **election timer**: every heartbeat refills it, and if it runs out the node
+  becomes a candidate (orange). A killed node is grey with a red cross, a
+  suspended one is light blue. The box in the corner shows how many nodes are
+  up and the majority needed (2 of 3).
+- **Node cards** (under the triangle). Role, term, vote, leader, commit index,
+  last applied, last log index and term, state digest (same colour means same
+  state), pid and start count. Below that: heartbeats received (or sent, on
+  the leader) with how long ago the last one arrived (the dot is green while
+  they keep coming), the election-timer bar with the milliseconds left, and,
+  on the leader, each follower's `matchIndex`/`nextIndex` and how long ago it
+  last replied. Buttons: **Kill -9** (TerminateProcess on the whole process
+  tree, no cleanup), **Suspend** / **Resume** (NtSuspendProcess: frozen,
+  sockets stay open), **Restart** (same data dir: the node replays its log
+  and the leader sends it what it missed).
+- **Account** (right). Log in (one-click buttons for the test users, password
+  `pass`) or **Create account**. Each browser **tab** is its own session, so
+  two tabs can be two different users side by side.
+- **New auction**. Item, duration (30 s to 1 h, or custom 15 s to 30 days),
+  and optional attributes. With attributes, the leader asks the LLM to write
+  the description before it proposes the auction.
+- **Auctions**. One card per auction: seller (marked `YOU` on your own),
+  description, high bid, countdown and bar, the latest bids, the bid form,
+  and after the close the winner, the summary and the escrow state. **Ask
+  assistant** opens that auction's own assistant (see step 6); the seller
+  also gets **Edit description**. Filters: All / Open / Closed / Mine.
+- **Users** and **Events**. Every account, and a log of kills, elections,
+  new leaders, users, auctions, bids, closes, summaries and escrow changes.
+- **Scenarios** (under the cluster). Three buttons that start a predefined run
+  on this same cluster, so you can kill, suspend and restart nodes while
+  real clients are bidding (see below).
+
 ### Scenarios: run the predefined auctions and break things while they run
 
 Each button starts real clients (one `ClusterClient` per user, with retries
@@ -214,7 +357,7 @@ like: kill the leader, suspend a follower, kill two nodes, restart them.
 | button | what it does | about |
 |---|---|---|
 | **Vintage clock** | nisarg sells a vintage clock (LLM description); karan, mrudul and tanmay bid, two of them bid 200 **at the same moment** (exactly one wins); the seller tries to bid on his own auction and is refused; karan asks the assistant; more bids every 5 s; after the close the winner pays into escrow and the seller releases it | 75 s |
-| **Four auctions** | a hero vintage clock plus a film camera, a pocket watch and a record player; six background bidders `bg1`-`bg6` bid on the three until they close and pay for what they win; the hero gets bids and an equal-bid race; at the end the seller releases three escrows and refunds one | 2 min |
+| **Four auctions** | the scripted demo's setup: a hero vintage clock plus a film camera, a pocket watch and a record player; six background bidders `bg1`-`bg6` bid on the three until they close and pay for what they win; the hero gets bids and an equal-bid race; at the end the seller releases three escrows and refunds one | 2 min |
 | **Chaos workload** | the chaos harness's workload (`harness/workload.py`): sellers creating auctions, bidders, three racers sending equal bids at once, payers; choose 1, 2 or 5 minutes. Tick **automatic faults** to also run the chaos harness's random fault schedule (leader and follower kills and suspends, each healed after a few seconds) on top of yours | 1-5 min |
 
 The card shows the steps as they happen (newest first), the write counts
@@ -229,6 +372,80 @@ or you stop it, the dashboard:
    evidence for a failure, and saves the run (history, dumps, report) in
    `runs\dashboard-<time>\scenario-<n>-<name>\`. Re-check it any time with
    `.venv\Scripts\python.exe -m checker runs\dashboard-<time>\scenario-<n>-<name>`.
+
+Measured on 2026-11-17: **Vintage clock** with a leader kill and restart
+mid-run, 18 writes, all 10 properties PASS. **Four auctions** with a leader
+kill, a follower suspend/resume and a restart mid-run, 897 writes, all 10 PASS.
+**Chaos workload**, 60 s with automatic faults (3 leader kills, 3 suspends),
+771 writes, all 10 PASS (after the checker learned the create refusal below).
+
+The first chaos run found a checker gap: a seller's create, retried across a
+leader kill for longer than the auction's lifetime, reached the new leader
+after its own close time and was correctly refused ("The close time must be
+in the future"), but the checker did not know that reason. It now accepts it
+only if the close time really had passed when the reply came.
+
+The checker reads the whole replicated state, so anything you did by hand in
+the same cluster is checked as well.
+
+### A ten-minute walkthrough (by hand)
+
+To start with a busy cluster instead, press **Four auctions** (or **Chaos
+workload**) first and do steps 7-10 while it runs.
+
+1. **Watch the heartbeats.** Gold dots leave the leader every 100 ms (the
+   heartbeat interval). Each follower's ring refills before it can run out
+   (the election timeout is 0.5-1.0 s), and the heartbeat counters on the
+   node cards keep climbing. The header says `3/3 in sync`.
+2. **Create a user.** Account card → **Create account** → `alice` /
+   `alice123` / `alice123`. Events shows `new user alice`, alice appears
+   under Users, and you are signed in as alice. Try `Alice`, `al`, a
+   3-character password, or two different passwords first: each one is
+   refused with the reason under the field.
+3. **Create an auction as alice.** New auction → item `vintage camera`, runs
+   for **2 minutes**, attributes `condition` = `mint` and `brand` = `Leica` →
+   **Create auction**. A card appears with an LLM-written description.
+4. **Try to bid on your own auction.** On alice's card the bid form is
+   replaced by *"You can't bid on your own auction."* Click **Send a bid
+   anyway**. The dashboard skips its own check and sends the bid to the
+   cluster, and the card shows the cluster's refusal: `alice is the seller of
+   this auction: a seller cannot bid on their own auction (refused by the
+   cluster's state machine)`. The rule is in `apply()`, so no client can get
+   around it.
+5. **Bid as someone else.** Open a **second tab** on the same URL, click
+   `karan`, and bid on the camera. The form is prefilled with the high bid
+   + 1, and `+10`, `+50`, `+100` change it. Both tabs show the new price and
+   the bid in the list. Try `0`, `10.5`, `-3`, or a bid that is not above
+   the high bid: each is refused with a reason.
+6. **Ask the auction's assistant.** In karan's tab click **Ask assistant** on
+   the camera and ask *"Can I bid on this?"* or *"Am I winning?"*. Ask the
+   same in alice's tab. The model is told who is asking, who the seller is
+   and who holds the high bid, so it tells alice that she cannot bid and
+   tells karan that he is winning. Each auction has its own assistant and its
+   own thread, and the model gets only that auction's live state.
+7. **Kill the leader.** Click **Kill -9** on the gold card. The gold dots
+   stop, the followers' rings run down, one node turns orange (candidate) and
+   then a new leader turns gold with the term one higher. Events shows
+   `killed n1 (leader)`, then `... candidate, term 2` and `... leader, term
+   2`. Bid again in karan's tab and it works: the session token was
+   replicated, and the client found the new leader.
+8. **Bring it back.** **Restart** the dead node. Its card shows `start #2`,
+   its commit index climbs to the leader's, its digest turns the same colour,
+   and the header goes back to `3/3 in sync`.
+9. **Lose the majority.** Kill **two** nodes. The corner box says **No
+   quorum**, and a bid now fails after about 15 s with *"No leader answered
+   in time"*: one node out of three cannot commit anything. Restart one node,
+   a leader is elected, and bids work again. Then restart the third.
+10. **Freeze a follower.** **Suspend** a follower. It turns light blue, and on
+    the leader's card its *last reply* age climbs and turns red, while bids
+    still commit on the other two nodes. **Resume** it and it catches up.
+    Suspending the leader instead shows a deposed leader coming back with an
+    old term.
+11. **Watch the close.** When the countdown reaches 0 the card says
+    `CLOSING…` until the leader's closer commits `CloseAuction`. Then it shows
+    **Won by karan at ...** and, a few seconds later, the **summary**.
+12. **Stop.** Press Ctrl+C in the terminal. The run is kept in
+    `runs\dashboard-<time>\`, with one log per node in `logs\`.
 
 ### Validation rules
 
@@ -408,7 +625,7 @@ there.
 - **A resumed follower deposes a healthy leader.** There is no PreVote and no
   §6 rule (decisions.md T15). This costs liveness, never safety.
 - **The chaos run's LLM was a canned-answer server.** The FAQ and price-trend
-  reads are covered by unit and gRPC tests, not by chaos. (The
+  reads are covered by unit and gRPC tests and the demo, not by chaos. (The
   chaos workload does read now: payers read `GetAuction`, sellers `GetEscrow`.)
 - **The peer port is plain TCP with no auth.** Session tokens are stored in
   plain text in `log.bin` ([auction-on-raft.md](docs/auction-on-raft.md) §15).
@@ -444,6 +661,7 @@ there.
   field on the server. It dispatches to the typed handlers behind the same auth
   and leader rules; the typed RPCs are the primary API (decisions.md C19).
 - Chaos runs are seeded but not deterministic, because they use real processes and wall-clock time. A deterministic simulator on a virtual clock is the natural next step.
+- **The demo's second leader kill is not under background load.** The hero auction closes last and its payment waits for that close, so every background auction has already closed when the second kill happens. The demo reports that stall as n/a.
 - **The background bidders are clients on one machine,** about 17 bids a second in the steady state. They are not a load test.
 
 ---
@@ -475,7 +693,7 @@ there.
 It prints the zip path and every file in it. It contains the code, `generated\`,
 `proto\`, `scripts\`, `tests\`, `docs\`, README, LICENSE, `requirements.txt`,
 `pytest.ini` and `Documents\Problem_Statement.md`. It leaves out `.venv`,
-`data\`, `__pycache__`, `.git`, `papers\`, `runs\`,
+`data\`, `__pycache__`, `.git`, `papers\`, CLAUDE.md, CLAUDE.old.md, `runs\`,
 `logs\`, `dist\`, the personal note folders `MyNotes\`, `Learning\` and the rest
 of `Documents\`, and two personal notes in `docs\`: `viva-prep.md` and
 `reflection-facts.md`. Tested by `tests\test_make_submission.py`.
