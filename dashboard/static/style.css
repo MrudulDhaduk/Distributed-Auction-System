@@ -348,3 +348,4 @@ input.invalid { border-color: var(--bad); box-shadow: 0 0 0 3px color-mix(in srg
 .mode-switch button { border: 0; background: var(--card-2); padding: 4px 10px; font-size: 12px; cursor: pointer; color: var(--muted); }
 .mode-switch button + button { border-left: 1px solid var(--line); }
 .mode-switch button.active { background: var(--accent); color: #fff; }
+.pay-row { display: flex; gap: 6px; flex-wrap: wrap; }

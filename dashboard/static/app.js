@@ -773,7 +773,7 @@ function updateAuctionCard(ref, a) {
   drawAction(ref);
   if (ref.bidInput && document.activeElement !== ref.bidInput && Number(ref.bidInput.value) <= a.high_bid) ref.bidInput.value = a.high_bid + 1;
   // closed box
-  const ckey = `${a.closed}|${a.winner}|${a.summary}|${a.escrow.status}`;
+  const ckey = `${a.closed}|${a.winner}|${a.summary}|${a.escrow.status}|${me}`;
   if (ckey !== ref.closedKey) {
     ref.closedKey = ckey;
     ref.closedBox.innerHTML = "";
@@ -786,7 +786,24 @@ function updateAuctionCard(ref, a) {
         const sm = el("div", "summary"); sm.append(el("span", "lbl", "Summary"), a.summary);
         ref.closedBox.appendChild(sm);
       } else if (S.data && S.data.llm !== "off") ref.closedBox.appendChild(el("div", "hint", "Summary pending…"));
-      if (a.escrow && a.escrow.status !== "NONE") ref.closedBox.appendChild(el("div", "escrow", `escrow: ${a.escrow.status} · ${fmt(a.escrow.amount)} from ${a.escrow.payer}`));
+      const status = a.escrow ? a.escrow.status : "NONE";
+      if (a.winner) {
+        const line = { NONE: "escrow: not paid yet", HELD: `escrow: ${fmt(a.escrow.amount)} held from ${a.escrow.payer}`,
+                       RELEASED: `escrow: released to ${a.owner}`, REFUNDED: `escrow: refunded to ${a.escrow.payer}` }[status];
+        ref.closedBox.appendChild(el("div", "escrow", line || `escrow: ${status}`));
+      }
+      const pay = el("div", "pay-row");
+      const button = (label, action, cls = "") => {
+        const b = el("button", `btn small ${cls}`, label);
+        b.onclick = () => withBusy(b, async () => {
+          try { const r = await api(`/api/${action}`, { auction_id: a.auction_id }); setMsg(ref, r.message, "ok"); }
+          catch (e) { setMsg(ref, e.message, "err"); }
+        });
+        pay.appendChild(b);
+      };
+      if (a.winner && a.winner === me && status === "NONE") button(`Pay ${fmt(a.high_bid)} into escrow`, "pay", "primary");
+      if (a.owner === me && status === "HELD") { button("Release to me", "release", "primary"); button("Refund the winner", "refund"); }
+      if (pay.children.length) ref.closedBox.appendChild(pay);
     }
   }
 }

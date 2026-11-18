@@ -432,6 +432,36 @@ class Dashboard:
         run.start()
         return {"ok": True, "message": f"started {run.title}"}
 
+    def escrow_action(self, session_id, action, payload):
+        """pay (the winner, the winning amount), release / refund (the seller).
+        The dashboard checks first for a clear message; apply() decides
+        (auction/state.py payment_rejection / settlement_rejection)."""
+        s = self._session(session_id)
+        payload = validate.body(payload)
+        auction_id = payload.get("auction_id")
+        if isinstance(auction_id, bool) or not isinstance(auction_id, int) or auction_id < 1:
+            raise Invalid("Auction must be a positive whole number")
+        a = self._auction(auction_id)
+        if a is not None:
+            if not a["closed"]:
+                raise Invalid("The auction has not closed yet")
+            if action == "pay" and a["winner"] != s.username:
+                raise Invalid("Only the winner can pay")
+            if action != "pay" and a["owner"] != s.username:
+                raise Invalid("Only the seller can release or refund the escrow")
+        with s.lock:
+            if action == "pay":
+                amount = a["high_bid"] if a is not None else 0
+                r = s.client.pay(auction_id, amount)
+            elif action == "release":
+                r = s.client.release_escrow(auction_id)
+            else:
+                r = s.client.refund_escrow(auction_id)
+        if not r.result.success:
+            raise Invalid(r.result.reason)
+        self.event("escrow", f"{s.username}: {action} on #{auction_id}")
+        return {"ok": True, "message": r.result.reason}
+
     def stop_scenario(self):
         run = self.scenario
         if run is None or not run.is_alive():
@@ -636,6 +666,8 @@ def make_handler(dash: Dashboard):
                     result = dash.start_scenario(parts[2], payload)
                 elif path == "/api/raft/prevote":
                     result = dash.set_prevote(payload)
+                elif path in ("/api/pay", "/api/release", "/api/refund"):
+                    result = dash.escrow_action(sid, path.rsplit("/", 1)[1], payload)
                 elif path == "/api/scenarios/stop":
                     result = dash.stop_scenario()
                 elif path == "/api/describe":

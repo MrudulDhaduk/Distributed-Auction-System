@@ -340,9 +340,11 @@ background.
   the description before it proposes the auction.
 - **Auctions**. One card per auction: seller (marked `YOU` on your own),
   description, high bid, countdown and bar, the latest bids, the bid form,
-  and after the close the winner, the summary and the escrow state. **Ask
-  assistant** opens that auction's own assistant (see step 6); the seller
-  also gets **Edit description**. Filters: All / Open / Closed / Mine.
+  and after the close the winner, the summary and the escrow state. After the
+  close the winner gets **Pay ... into escrow**, and once it is paid the
+  seller gets **Release to me** and **Refund the winner**. **Ask assistant**
+  opens that auction's own assistant (see step 6); the seller also gets
+  **Edit description**. Filters: All / Open / Closed / Mine.
 - **Users** and **Events**. Every account, and a log of kills, elections,
   new leaders, users, auctions, bids, closes, summaries and escrow changes.
 - **Scenarios** (under the cluster). Three buttons that start a predefined run
@@ -420,6 +422,16 @@ How it is built: `RequestVote` has a `preVote` flag (`proto/raft.proto`); a
 node answering a pre-vote changes no state (`raft/node.py`
 `_answer_prevote`); `StatusService.SetPreVote` switches a node at run time;
 `python -m server.serve --prevote` starts a node with it on.
+
+### Payments from the page
+
+After an auction closes, the winner sees **Pay <amount> into escrow** on its
+card, and after that the seller sees **Release to me** and **Refund the
+winner**. The page only shows each button to the person allowed to press it,
+and `apply()` refuses anyone else whatever client they use. Checked on
+2026-11-18: a non-winner paying, a second payment, the seller releasing
+before payment, and a non-seller releasing were each refused, and pay, then
+release, ended in RELEASED; pay, then refund, ended in REFUNDED.
 
 ### A ten-minute walkthrough (by hand)
 
