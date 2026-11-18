@@ -32,7 +32,7 @@ if (-not $OutDir) { $OutDir = Join-Path $root "dist" }
 $top = "Distributed-Auction-System"
 
 $includeDirs = @(
-    "auction", "checker", "client", "common", "generated", "harness",
+    "auction", "checker", "client", "common", "dashboard", "generated", "harness",
     "llm_server", "raft", "replication", "server", "sessions",
     "proto", "scripts", "docs", "tests"
 )
