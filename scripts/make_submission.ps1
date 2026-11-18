@@ -37,6 +37,7 @@ $includeDirs = @(
     "proto", "scripts", "docs", "tests"
 )
 $includeFiles = @("README.md", "requirements.txt", "pytest.ini", "LICENSE",
+                  "Dockerfile", "docker-compose.yml", ".dockerignore",
                   "Documents/Problem_Statement.md")
 
 $excludeSegments = @(".venv", "data", "__pycache__", ".git", "papers",

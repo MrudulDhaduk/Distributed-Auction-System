@@ -1,0 +1,60 @@
+# GroundHog: the distributed auction system. One command for the whole system:
+#
+#   docker compose up --build          # first time: builds the app, downloads the model (~2.5 GB, once)
+#   open http://localhost:8765
+#   docker compose down                # stop everything (the model stays cached)
+#
+# Containers:
+#   ollama   the model server (CPU), models cached in the `ollama-models` volume
+#   model    one-shot: pulls the model into that volume, then exits
+#   auction  the web dashboard + LLM server + Raft nodes n1, n2, n3 (as processes)
+#
+# Without the model (no download, canned answers):
+#   DASHBOARD_LLM=fake docker compose up --build auction --no-deps
+# Using an Ollama already running on the host instead of the container:
+#   OLLAMA_HOST=http://host.docker.internal:11434 docker compose up --build auction --no-deps
+#   (the host's Ollama must listen on all interfaces: set OLLAMA_HOST=0.0.0.0 for it)
+
+name: groundhog
+
+services:
+  ollama:
+    image: ollama/ollama:0.34.4
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  model:
+    image: ollama/ollama:0.34.4
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "qwen3:4b-instruct-2507-q4_K_M"]
+    restart: "no"
+
+  auction:
+    build: .
+    image: groundhog:local
+    depends_on:
+      model:
+        condition: service_completed_successfully
+    environment:
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+    command: ["python", "-m", "dashboard", "--host", "0.0.0.0", "--port", "8765", "--llm", "${DASHBOARD_LLM:-real}"]
+    ports:
+      - "${DASHBOARD_PORT:-8765}:8765"   # DASHBOARD_PORT=8770 docker compose up ... if 8765 is taken
+    volumes:
+      - ./runs:/app/runs            # node logs, scenario results and replays stay on the host
+    init: true
+    stop_signal: SIGINT
+    stop_grace_period: 20s
+
+volumes:
+  ollama-models:
+    name: groundhog-ollama-models   # fixed name: the model is downloaded once, whatever the folder is called

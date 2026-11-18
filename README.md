@@ -13,7 +13,9 @@ Built for CS G623 (Advanced Operating Systems). It ships with a seeded chaos
 harness and a property checker that tests the guarantees on real processes.
 Requirement-by-requirement status: [docs/requirements-audit.md](docs/requirements-audit.md).
 
-**Want to see it working?** Run `.venv\Scripts\python.exe -m dashboard --open` and follow
+**Want to see it working?** Run `docker compose up --build` (see
+[Run it with Docker](#run-it-with-docker-groundhog)) or
+`.venv\Scripts\python.exe -m dashboard --open`, and follow
 [Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard): a
 browser dashboard that starts the cluster, shows every replica and its heartbeats live,
 and lets you kill nodes, create users and auctions, bid, and ask each auction's assistant.
@@ -79,6 +81,58 @@ flowchart LR
   [docs/auction-on-raft.md](docs/auction-on-raft.md) §2.
 - **Reads** are served only by the leader, after a read-index round
   (decisions.md A14, A15).
+
+---
+
+## Run it with Docker (GroundHog)
+
+The quickest way to run everything, on any machine with Docker Desktop: no
+Python, venv or Ollama install needed.
+
+```powershell
+docker compose up --build        # first time: builds the image, downloads the model (~2.5 GB, once)
+```
+
+Open **http://localhost:8765** and follow
+[Walk through the demo yourself](#walk-through-the-demo-yourself-web-dashboard).
+`docker compose down` stops everything; the model stays cached for next time.
+
+| container | what runs in it |
+|---|---|
+| `ollama` | the model server, `ollama/ollama:0.34.4` (CPU); models in the volume `groundhog-ollama-models` |
+| `model` | one-shot: pulls `qwen3:4b-instruct-2507-q4_K_M` into that volume, then exits |
+| `auction` | image `groundhog:local` (Python 3.11): the web dashboard, the LLM server and the Raft nodes n1, n2, n3 as separate processes |
+
+The nodes are processes inside one container, not one container each, on
+purpose: the dashboard starts them itself, so **Kill -9, Suspend, Resume and
+Restart work exactly as without Docker** (on Linux they are SIGKILL, SIGSTOP
+and SIGCONT). Node logs, scenario results and replays are written to `runs\`
+on your machine (a bind mount).
+
+Variations:
+
+```powershell
+$env:DASHBOARD_PORT=8770; docker compose up --build                 # 8765 is taken
+$env:DASHBOARD_LLM="fake"; docker compose up --build auction --no-deps   # canned answers, no model download
+docker compose run --rm auction python -m pytest -q                 # the test suite, on Linux
+```
+
+Measured on 2026-11-18 (Docker Desktop 29.9.2 on the dev laptop):
+
+- The full dashboard check (three leader kills, a cut link, an isolated
+  leader, Classic vs PreVote, a Vintage clock scenario with a kill and a
+  partition) passed in the container, 10/10 checker properties, never two
+  leaders in one term.
+- Failover is faster on Linux: a new leader about **0.63 s** after a kill
+  (1.2-1.6 s on Windows) and the first bid after it in 0.1-0.2 s, because
+  Linux refuses a connection to a dead port at once instead of after 2 s.
+- The real model works through the containers but is slower: about 6-7 s per
+  answer, against 1-2 s with Ollama on Windows, since Docker Desktop gives the
+  model only part of the CPU.
+- The test suite in the container: 780 passed, 11 skipped (Windows-only
+  process tests), 3 xfailed.
+- `docker stop` stops the dashboard and the nodes it started cleanly (exit 0,
+  about 1 s).
 
 ---
 
