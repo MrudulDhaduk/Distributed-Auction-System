@@ -24,6 +24,7 @@ def vote_args_to_wire(a: RequestVoteArgs) -> raft_pb2.RequestVoteRequest:
         term=a.term,
         lastLogIndex=a.last_log_index,
         lastLogTerm=a.last_log_term,
+        preVote=a.pre_vote,
     )
 
 
@@ -34,6 +35,7 @@ def vote_args_from_wire(m: raft_pb2.RequestVoteRequest) -> RequestVoteArgs:
         term=m.term,
         last_log_index=m.lastLogIndex,
         last_log_term=m.lastLogTerm,
+        pre_vote=m.preVote,
     )
 
 

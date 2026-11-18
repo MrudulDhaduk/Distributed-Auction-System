@@ -23,6 +23,9 @@ class RequestVoteArgs:
     term: int
     last_log_index: int
     last_log_term: int
+    # PreVote (Ongaro's thesis, section 9.6): "would you vote for me in
+    # `term`?" The receiver changes nothing (no term, no vote, no timer).
+    pre_vote: bool = False
 
 
 @dataclass(frozen=True)

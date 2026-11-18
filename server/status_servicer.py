@@ -108,7 +108,12 @@ class StatusServicer(status_pb2_grpc.StatusServiceServicer):
             election_timeout_min_ms=int(getattr(s, "election_timeout", (0.0, 0.0))[0] * 1000),
             election_timeout_max_ms=int(getattr(s, "election_timeout", (0.0, 0.0))[1] * 1000),
             pid=os.getpid(),
+            prevote=getattr(s, "prevote", False),
         )
+
+    def SetPreVote(self, request, context):
+        self._raft.set_prevote(request.on)
+        return self.GetNodeStatus(status_pb2.NodeStatusRequest(include_digest=False), context)
 
     def DumpState(self, request, context):
         index, text, state_digest = self._compute()

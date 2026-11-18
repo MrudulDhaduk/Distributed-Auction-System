@@ -18,6 +18,13 @@ service StatusService {
   rpc GetNodeStatus(NodeStatusRequest) returns (NodeStatus);
   // Debug only: the whole applied state, for the checker.
   rpc DumpState(DumpStateRequest) returns (StateDump);
+  // Operator switch: PreVote on or off on this node (raft/node.py
+  // set_prevote). Volatile: a restarted node starts with its --prevote flag.
+  rpc SetPreVote(SetPreVoteRequest) returns (NodeStatus);
+}
+
+message SetPreVoteRequest {
+  bool on = 1;
 }
 
 message NodeStatusRequest {
@@ -65,6 +72,7 @@ message NodeStatus {
   int64 election_timeout_min_ms = 18;
   int64 election_timeout_max_ms = 19;
   int64 pid = 20;                     // this process's id (os.getpid())
+  bool prevote = 21;                  // PreVote on (Ongaro's thesis 9.6)?
 }
 
 message PeerReplication {

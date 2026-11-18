@@ -342,3 +342,9 @@ input.invalid { border-color: var(--bad); box-shadow: 0 0 0 3px color-mix(in srg
 .scen-report .ev { grid-column: 2 / -1; color: var(--bad); font-size: 12px; overflow-wrap: anywhere; }
 .scen-report-head { font-size: 12px; color: var(--muted); }
 #scen-run .bar i { transition: none; }
+
+/* --- Raft mode switch --- */
+.mode-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.mode-switch button { border: 0; background: var(--card-2); padding: 4px 10px; font-size: 12px; cursor: pointer; color: var(--muted); }
+.mode-switch button + button { border-left: 1px solid var(--line); }
+.mode-switch button.active { background: var(--accent); color: #fff; }

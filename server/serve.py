@@ -124,6 +124,7 @@ class AuctionNode:
         closer_interval: float = DEFAULT_INTERVAL_SECONDS,
         rng: random.Random | None = None,
         payment_gateway=None,
+        prevote: bool = False,
     ):
         if node_id in peers:
             raise ValueError("--peers must not include this node's own id")
@@ -142,6 +143,7 @@ class AuctionNode:
             observer=lambda event: log.info(event.describe()),
             storage=storage,
             apply_fn=self.state_machine.apply_fn,
+            prevote=prevote,
         )
         client_addrs = {pid: f"{a.host}:{a.client_port}" for pid, a in peers.items()}
         client_addrs[node_id] = f"{host}:{client_port}"
@@ -228,6 +230,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--election-timeout-max", type=float, default=DEFAULT_ELECTION_TIMEOUT[1])
     p.add_argument("--heartbeat", type=float, default=DEFAULT_HEARTBEAT_INTERVAL)
     p.add_argument("--verbose", action="store_true", help="also log lost RPCs")
+    p.add_argument("--prevote", action="store_true",
+                   help="start with PreVote on (Ongaro's thesis 9.6); switchable at run time from the dashboard")
     return p
 
 
@@ -255,6 +259,7 @@ def main(argv=None):
         LLMClient(args.llm_addr, deadline=args.llm_deadline),
         election_timeout=(args.election_timeout_min, args.election_timeout_max),
         heartbeat_interval=args.heartbeat,
+        prevote=args.prevote,
     )
     node.start()
     log.info(

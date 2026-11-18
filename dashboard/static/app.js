@@ -141,6 +141,7 @@ function render(d) {
   renderUsers(d);
   renderEvents(d, first);
   renderScenario(d);
+  renderModeSwitch(d);
   S.pollAt = performance.now();
   for (const n of d.nodes) S.prevStatus[n.node_id] = n.status ? { ...n.status, process: n.process } : { process: n.process };
 }
@@ -307,6 +308,7 @@ function buildNodeCard(n) {
     <div class="stats">
       <div><span>term</span><span data-k="term"></span></div><div><span>voted for</span><span data-k="voted"></span></div>
       <div><span>leader</span><span data-k="leader"></span></div><div><span>commit</span><span data-k="commit"></span></div>
+      <div><span>mode</span><span data-k="mode"></span></div><div></div>
       <div><span>last log</span><span data-k="log"></span></div><div><span>applied</span><span data-k="applied"></span></div>
       <div style="grid-column:1/-1"><span>state digest</span><span data-k="digest"></span></div>
     </div>
@@ -346,6 +348,7 @@ function renderNodes(d) {
     const K = ref.k;
     K.term.textContent = s ? s.term : "—"; K.voted.textContent = s ? (s.voted_for || "—") : "—";
     K.leader.textContent = s ? (s.leader_id || "?") : "—"; K.commit.textContent = s ? s.commit_index : "—";
+    K.mode.textContent = s ? (s.prevote ? "PreVote" : "classic") : "—";
     K.log.textContent = s ? `${s.last_log_index} (t${s.last_log_term})` : "—"; K.applied.textContent = s ? s.last_applied : "—";
     if (s) {
       if (!(s.state_digest in digests)) digests[s.state_digest] = DIGEST_COLORS[Object.keys(digests).length % DIGEST_COLORS.length];
@@ -974,8 +977,20 @@ function renderScenario(d) {
   }
 }
 
+/* ---------- Raft mode switch ---------- */
+function setupModeSwitch() {
+  document.querySelectorAll("[data-prevote]").forEach(b => b.addEventListener("click", () => withBusy(b, async () => {
+    try { const r = await api("/api/raft/prevote", { on: b.dataset.prevote === "true" }); toast(r.message, "ok"); }
+    catch (e) { toast(e.message, "err"); }
+  })));
+}
+function renderModeSwitch(d) {
+  document.querySelectorAll("[data-prevote]").forEach(b => b.classList.toggle("active", String(!!d.prevote) === b.dataset.prevote));
+}
+
 renderAccount();
 setupCreateForm();
 setupScenarios();
+setupModeSwitch();
 poll();
 requestAnimationFrame(frame);

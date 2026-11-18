@@ -175,6 +175,7 @@ class NodeStatus:
     peers: tuple = ()                           # of PeerTelemetry, leader only
     heartbeat_interval: float = 0.0
     election_timeout: tuple = (0.0, 0.0)
+    prevote: bool = False                       # PreVote on (thesis 9.6)?
 
 
 @dataclasses.dataclass(frozen=True)
@@ -199,6 +200,7 @@ class RaftNode:
         observer: Optional[Callable[[RoleChange], None]] = None,
         storage: Optional[Storage] = None,
         apply_fn: Optional[Callable[[int, bytes], Any]] = None,
+        prevote: bool = False,
     ):
         """
         observer: called with a RoleChange on every change of (term, role),
@@ -266,6 +268,18 @@ class RaftNode:
         self._hb_sent = 0
         self._peer_replies: dict = {}
         self._peer_reply_at: dict = {}
+
+        # PreVote (Ongaro's thesis, section 9.6). Off = the paper's Figure 2
+        # exactly. On = an election timeout first asks the others "would you
+        # vote for me in term T+1?" without touching its own term; only a
+        # majority of yes starts the real election. A node that was cut off
+        # or frozen then cannot depose a healthy leader by bumping the term.
+        # Volatile, switchable at run time (set_prevote): every node always
+        # ANSWERS a pre-vote; the flag only decides how this node STARTS one.
+        self._prevote = prevote
+        self._prevotes: set = set()
+        self._prevote_term: Optional[int] = None  # the term being asked about
+        self._last_leader_contact: Optional[float] = None  # monotonic; a current-term AppendEntries
 
         # Read-index (section 8; see read_index). Leader only, reset in
         # _become_leader except the round counter, which only ever grows.
@@ -364,7 +378,18 @@ class RaftNode:
                 peers=peers,
                 heartbeat_interval=self._heartbeat_interval,
                 election_timeout=self._election_timeout,
+                prevote=self._prevote,
             )
+
+    def set_prevote(self, on: bool) -> None:
+        """Switch PreVote on or off. Safe at any time: it only changes how
+        the NEXT election timeout begins."""
+        with self._lock:
+            if self._prevote != bool(on):
+                log.info("[%s] PreVote %s", self.node_id, "on" if on else "off")
+            self._prevote = bool(on)
+            self._prevote_term = None
+            self._prevotes = set()
 
     def log_entries(self) -> tuple:
         """A copy of log[1..lastLogIndex], for tests and debugging."""
@@ -514,7 +539,7 @@ class RaftNode:
                 # elapses without receiving AppendEntries RPC from current
                 # leader or granting vote to candidate: convert to candidate"
                 # / "If election timeout elapses: start new election".
-                votes = self._start_election()
+                votes = self._start_prevote() if self._prevote else self._start_election()
         # Lock released: only now do any RPCs leave the node.
         for peer, args in votes:
             self._submit(self._send_vote_request, peer, args)
@@ -588,6 +613,23 @@ class RaftNode:
                 peer,
                 RequestVoteArgs(self.node_id, peer, self._current_term, last_index, last_term),
             )
+            for peer in self._peers
+        ]
+
+    def _start_prevote(self) -> list:
+        """PreVote round: ask "would you vote for me in currentTerm+1?".
+        No term change, no vote, role unchanged; the timer is re-armed so a
+        failed round is simply tried again after the next timeout."""
+        self._reset_election_timer()
+        self._prevote_term = self._current_term + 1
+        self._prevotes = {self.node_id}
+        if len(self._prevotes) >= self._majority:  # cluster of one
+            self._prevote_term = None
+            return self._start_election()
+        log.info("[%s] term %d: pre-vote for term %d", self.node_id, self._current_term, self._prevote_term)
+        last_index, last_term = self._last_log()
+        return [
+            (peer, RequestVoteArgs(self.node_id, peer, self._prevote_term, last_index, last_term, pre_vote=True))
             for peer in self._peers
         ]
 
@@ -705,9 +747,32 @@ class RaftNode:
 
     # --- incoming RPCs (called by the servicer / InMemoryTransport) ----------
 
+    def _answer_prevote(self, args: RequestVoteArgs) -> RequestVoteReply:
+        """Would we vote for args.from_id in args.term? Changes nothing.
+        Yes only if (1) that term is ahead of ours, (2) its log is at least as
+        up to date as ours (5.4.1), and (3) we have not heard from a leader
+        within the minimum election timeout -- the rule that stops a node
+        that was cut off or frozen from disturbing a working cluster."""
+        now = time.monotonic()
+        recent = (self._role == Role.LEADER or (
+            self._last_leader_contact is not None and now - self._last_leader_contact < self._election_timeout[0]))
+        if args.term <= self._current_term:
+            granted, why = False, f"term {args.term} is not ahead of ours ({self._current_term})"
+        elif recent:
+            granted, why = False, "we have a live leader"
+        elif not self._candidate_log_ok(args):
+            granted, why = False, "its log is behind ours"
+        else:
+            granted, why = True, "ok"
+        log.info("[%s] term %d: pre-vote for %s (term %d) %s (%s)", self.node_id, self._current_term,
+                 args.from_id, args.term, "GRANTED" if granted else "refused", why)
+        return RequestVoteReply(self.node_id, args.from_id, self._current_term, granted)
+
     def handle_request_vote(self, args: RequestVoteArgs) -> RequestVoteReply:
         """Figure 2, "RequestVote RPC", receiver implementation."""
         with self._lock:
+            if args.pre_vote:
+                return self._answer_prevote(args)
             # All Servers rule first: it can raise currentTerm and clear
             # votedFor, which the checks below then see.
             self._step_down_if_stale(args.term, f"RequestVote from {args.from_id}")
@@ -777,6 +842,7 @@ class RaftNode:
             self._leader_id = args.from_id
             self._hb_received += 1
             self._hb_last_at = time.monotonic()
+            self._last_leader_contact = self._hb_last_at
             # Followers: the timer is reset on "receiving AppendEntries RPC
             # from current leader" -- and only from a current-term leader,
             # which the term check above has established.
@@ -872,7 +938,27 @@ class RaftNode:
         except Exception:
             log.exception("[%s] RequestVote to %s crashed", self.node_id, peer)
             return
-        self._on_vote_reply(peer, args.term, reply)
+        if args.pre_vote:
+            self._on_prevote_reply(peer, args, reply)
+        else:
+            self._on_vote_reply(peer, args.term, reply)
+
+    def _on_prevote_reply(self, peer: str, args: RequestVoteArgs, reply: RequestVoteReply):
+        votes = []
+        with self._lock:
+            # A real higher term in the answer still counts (All Servers rule).
+            if self._step_down_if_stale(reply.term, f"pre-vote reply from {peer}"):
+                self._prevote_term = None
+                return
+            if self._prevote_term != args.term or self._role == Role.LEADER:
+                return  # an old round, or we no longer need it
+            if reply.vote_granted:
+                self._prevotes.add(peer)
+                if len(self._prevotes) >= self._majority:
+                    self._prevote_term = None
+                    votes = self._start_election()
+        for p, a in votes:
+            self._submit(self._send_vote_request, p, a)
 
     def _on_vote_reply(self, peer: str, sent_term: int, reply: RequestVoteReply):
         with self._lock:

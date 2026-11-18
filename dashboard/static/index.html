@@ -30,6 +30,10 @@
       <div class="card-head">
         <h2>Cluster</h2>
         <span class="hint">Dots: heartbeats from the leader. Ring: election timer.</span>
+        <div class="mode-switch" role="group" aria-label="Raft mode">
+          <button type="button" data-prevote="false" title="The Raft paper's Figure 2: a node whose timer runs out starts an election at once">Classic Raft</button>
+          <button type="button" data-prevote="true" title="A node whose timer runs out first asks the others; nobody with a live leader says yes">PreVote</button>
+        </div>
       </div>
       <div class="cluster-wrap">
         <svg id="topology" viewBox="0 0 640 390" role="img" aria-label="Cluster topology"></svg>

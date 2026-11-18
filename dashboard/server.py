@@ -126,6 +126,7 @@ class Dashboard:
         self._leaders = set()                                 # (term, node) LEADER sightings, for the checker
         self.scenario = None                                  # the current or last ScenarioRun
         self._scenario_no = 0
+        self.prevote = False                                  # desired Raft mode on every node
 
     # --- lifecycle -----------------------------------------------------------------
 
@@ -180,7 +181,25 @@ class Dashboard:
             "election_timeout_min_ms": m.election_timeout_min_ms,
             "election_timeout_max_ms": m.election_timeout_max_ms,
             "pid": m.pid,
+            "prevote": m.prevote,
         }
+
+    def _set_prevote_on(self, nid, on):
+        try:
+            self._stubs[nid].SetPreVote(status_pb2.SetPreVoteRequest(on=on), timeout=STATUS_TIMEOUT)
+        except grpc.RpcError:
+            pass  # down or frozen: tried again on the next poll
+
+    def set_prevote(self, payload):
+        payload = validate.body(payload)
+        on = payload.get("on")
+        if not isinstance(on, bool):
+            raise Invalid("Send {\"on\": true} or {\"on\": false}")
+        self.prevote = on
+        for nid in self._stubs:
+            self._pool.submit(self._set_prevote_on, nid, on)
+        self.event("system", "Raft mode: " + ("PreVote (a returning node asks first)" if on else "classic Raft"))
+        return {"ok": True, "message": "PreVote on" if on else "PreVote off (classic Raft)"}
 
     def _status_loop(self):
         while not self._stop.wait(STATUS_INTERVAL):
@@ -196,6 +215,10 @@ class Dashboard:
                 self.nodes, self.leader = view, leader
                 for s in leaders:
                     self._leaders.add((s["term"], s["node_id"]))
+            # A restarted node comes back with PreVote off: put it in the chosen mode.
+            for nid, s in view.items():
+                if s is not None and s["prevote"] != self.prevote:
+                    self._pool.submit(self._set_prevote_on, nid, self.prevote)
 
     def _status_events(self, view, leader):
         for nid, s in view.items():
@@ -334,7 +357,7 @@ class Dashboard:
                 "auctions": list(self.auctions), "users": list(self.users),
                 "state_from": self.state_from, "state_at": self.state_at,
                 "events": list(self.events)[-120:], "llm": self.llm_status,
-                "llm_mode": self.llm_mode, "me": me.username if me else None,
+                "llm_mode": self.llm_mode, "me": me.username if me else None, "prevote": self.prevote,
                 "run_dir": self.run_dir,
                 "scenario": None if self.scenario is None else self.scenario.view(),
                 "scenarios": {"catalog": SCENARIOS, "chaos_durations": CHAOS_DURATIONS},
@@ -611,6 +634,8 @@ def make_handler(dash: Dashboard):
                     result = dash.ask(sid, payload)
                 elif len(parts) == 4 and parts[:2] == ["api", "scenarios"] and parts[3] == "start":
                     result = dash.start_scenario(parts[2], payload)
+                elif path == "/api/raft/prevote":
+                    result = dash.set_prevote(payload)
                 elif path == "/api/scenarios/stop":
                     result = dash.stop_scenario()
                 elif path == "/api/describe":

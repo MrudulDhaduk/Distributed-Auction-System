@@ -56,6 +56,11 @@ class StatusServiceStub:
                 request_serializer=status__pb2.DumpStateRequest.SerializeToString,
                 response_deserializer=status__pb2.StateDump.FromString,
                 _registered_method=True)
+        self.SetPreVote = channel.unary_unary(
+                '/status.StatusService/SetPreVote',
+                request_serializer=status__pb2.SetPreVoteRequest.SerializeToString,
+                response_deserializer=status__pb2.NodeStatus.FromString,
+                _registered_method=True)
 
 
 class StatusServiceServicer:
@@ -86,6 +91,14 @@ class StatusServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SetPreVote(self, request, context):
+        """Operator switch: PreVote on or off on this node (raft/node.py
+        set_prevote). Volatile: a restarted node starts with its --prevote flag.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_StatusServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -98,6 +111,11 @@ def add_StatusServiceServicer_to_server(servicer, server):
                     servicer.DumpState,
                     request_deserializer=status__pb2.DumpStateRequest.FromString,
                     response_serializer=status__pb2.StateDump.SerializeToString,
+            ),
+            'SetPreVote': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetPreVote,
+                    request_deserializer=status__pb2.SetPreVoteRequest.FromString,
+                    response_serializer=status__pb2.NodeStatus.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -166,6 +184,33 @@ class StatusService:
             '/status.StatusService/DumpState',
             status__pb2.DumpStateRequest.SerializeToString,
             status__pb2.StateDump.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetPreVote(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/status.StatusService/SetPreVote',
+            status__pb2.SetPreVoteRequest.SerializeToString,
+            status__pb2.NodeStatus.FromString,
             options,
             channel_credentials,
             insecure,
